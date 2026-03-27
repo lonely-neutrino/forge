@@ -608,6 +608,7 @@ def make_target_batch(model, batch, device, use_amp,
                       device=device)
     tgt = torch.zeros(bs, dtype=torch.long, device=device)
     gf = torch.zeros(bs, GLOBAL_DIM, device=device)
+    sf = torch.zeros(bs, 64, device=device)
 
     mb = torch.zeros(bs, 40, cd, device=device)
     mbm = torch.zeros(bs, 40, dtype=torch.bool, device=device)
@@ -627,6 +628,9 @@ def make_target_batch(model, batch, device, use_amp,
         cf[i, :nc] = torch.from_numpy(s['candidate_features'])
         cm[i, :nc] = True
         tgt[i] = s['selected_idx']
+        spell = s.get('spell_features')
+        if spell is not None:
+            sf[i] = torch.from_numpy(spell)
 
         g, zones, masks = parse_game_state(
             s['game_state_flat'], s['global_features'])
@@ -652,7 +656,7 @@ def make_target_batch(model, batch, device, use_amp,
                 gf, mb, mbm, ob, obm, h, hm,
                 mg, mgm, og, ogm, st, stm)
 
-        logits = head(state_emb, cf, cm)
+        logits = head(state_emb, cf, cm, spell_features=sf)
         loss = nn.functional.cross_entropy(logits, tgt)
 
     with torch.no_grad():

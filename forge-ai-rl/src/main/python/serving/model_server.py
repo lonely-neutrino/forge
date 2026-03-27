@@ -293,7 +293,16 @@ class ModelServer:
         target_features = self._to_tensor_2d(candidates, len(candidates), card_dim)
         target_mask = torch.ones(1, len(candidates), dtype=torch.bool, device=self.device)
 
-        logits = self.model.target_head(state, target_features, target_mask)
+        # Pass spell context if available
+        spell_raw = request.get('spellFeatures')
+        spell_features = None
+        if spell_raw is not None:
+            spell_features = torch.tensor(
+                [spell_raw], dtype=torch.float32,
+                device=self.device)
+
+        logits = self.model.target_head(state, target_features, target_mask,
+                                         spell_features=spell_features)
         probs = torch.softmax(logits, dim=-1)
 
         max_select = request.get('maxSelections', 1)

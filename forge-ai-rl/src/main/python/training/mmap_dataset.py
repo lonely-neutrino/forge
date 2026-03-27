@@ -352,6 +352,10 @@ class MmapTargetDataset(Dataset):
         self.selected_idx = np.load(
             os.path.join(td, 'selected_idx.npy'),
             mmap_mode='r')
+        spell_path = os.path.join(td, 'spell_features.npy')
+        self.spell_features = np.load(
+            spell_path, mmap_mode='r') \
+            if os.path.exists(spell_path) else None
 
         s = self.shared
         train_ids, val_ids = _split_file_ids(
@@ -385,6 +389,10 @@ class MmapTargetDataset(Dataset):
             'selected_idx': int(self.selected_idx[i]),
             'n_candidates': n,
             'won': float(s.outcome[si] > 0),
+            'spell_features': np.array(
+                self.spell_features[i]) \
+                if self.spell_features is not None \
+                else np.zeros(64, dtype=np.float32),
         }
 
 

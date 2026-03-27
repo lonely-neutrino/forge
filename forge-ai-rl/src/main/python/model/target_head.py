@@ -1,11 +1,14 @@
 """
 Target Selection Head — Pointer network that selects targets from a candidate set.
 Handles both single-target and multi-target selection.
+Accepts optional spell context (64-dim) to condition targeting on the source spell.
 """
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+ACTION_DIM = 64  # spell/action feature dimension
 
 
 class TargetHead(nn.Module):
@@ -20,6 +23,7 @@ class TargetHead(nn.Module):
 
         self.target_projection = nn.Linear(target_feature_dim, hidden_dim)
         self.state_projection = nn.Linear(state_dim, hidden_dim)
+        self.spell_projection = nn.Linear(ACTION_DIM, hidden_dim)
 
         # Pointer attention
         self.query_proj = nn.Linear(hidden_dim, hidden_dim)
@@ -31,7 +35,8 @@ class TargetHead(nn.Module):
         self.scale = hidden_dim ** 0.5
 
     def forward(self, game_state: torch.Tensor, target_features: torch.Tensor,
-                target_mask: torch.Tensor) -> torch.Tensor:
+                target_mask: torch.Tensor,
+                spell_features: torch.Tensor = None) -> torch.Tensor:
         """
         Compute scores for single-target selection.
 
@@ -39,12 +44,18 @@ class TargetHead(nn.Module):
             game_state: (batch, state_dim)
             target_features: (batch, max_targets, target_feature_dim)
             target_mask: (batch, max_targets)
+            spell_features: (batch, ACTION_DIM) optional source spell context
 
         Returns:
             target_logits: (batch, max_targets)
         """
         targets = self.target_projection(target_features)  # (batch, max_targets, hidden_dim)
         state = self.state_projection(game_state)  # (batch, hidden_dim)
+
+        # Add spell context to the query if available
+        if spell_features is not None:
+            spell_emb = self.spell_projection(spell_features)  # (batch, hidden_dim)
+            state = state + spell_emb
 
         query = self.query_proj(state).unsqueeze(1)  # (batch, 1, hidden_dim)
         keys = self.key_proj(targets)  # (batch, max_targets, hidden_dim)
@@ -57,7 +68,8 @@ class TargetHead(nn.Module):
         return logits
 
     def select_multiple(self, game_state: torch.Tensor, target_features: torch.Tensor,
-                        target_mask: torch.Tensor, num_selections: int) -> list:
+                        target_mask: torch.Tensor, num_selections: int,
+                        spell_features: torch.Tensor = None) -> list:
         """
         Autoregressive multi-target selection.
 
@@ -65,6 +77,12 @@ class TargetHead(nn.Module):
         """
         targets = self.target_projection(target_features)
         state = self.state_projection(game_state)  # (batch, hidden_dim)
+
+        # Add spell context
+        if spell_features is not None:
+            spell_emb = self.spell_projection(spell_features)
+            state = state + spell_emb
+
         keys = self.key_proj(targets)
 
         selections = []

@@ -15,16 +15,24 @@ public class DecisionContext {
     private final int minSelections;
     private final int maxSelections;
     private final String contextInfo; // human-readable description for logging
+    private final float[] spellFeatures; // 64-dim source spell features for targeting
 
     public DecisionContext(DecisionType type, GameStateFeatures gameState,
                            List<float[]> candidateFeatures, int minSelections,
                            int maxSelections, String contextInfo) {
+        this(type, gameState, candidateFeatures, minSelections, maxSelections, contextInfo, null);
+    }
+
+    public DecisionContext(DecisionType type, GameStateFeatures gameState,
+                           List<float[]> candidateFeatures, int minSelections,
+                           int maxSelections, String contextInfo, float[] spellFeatures) {
         this.type = type;
         this.gameState = gameState;
         this.candidateFeatures = candidateFeatures;
         this.minSelections = minSelections;
         this.maxSelections = maxSelections;
         this.contextInfo = contextInfo;
+        this.spellFeatures = spellFeatures;
     }
 
     public DecisionType getType() { return type; }
@@ -33,6 +41,7 @@ public class DecisionContext {
     public int getMinSelections() { return minSelections; }
     public int getMaxSelections() { return maxSelections; }
     public String getContextInfo() { return contextInfo; }
+    public float[] getSpellFeatures() { return spellFeatures; }
 
     /**
      * Convenience constructor for binary decisions (yes/no).

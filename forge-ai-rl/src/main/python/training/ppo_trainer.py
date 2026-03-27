@@ -275,6 +275,14 @@ def load_ppo_data(traj_dir):
                         p = max(old_probs[selected_idx], 1e-8)
                         old_lp = float(np.log(p))
 
+                    # Spell features for targeting context
+                    sf = rec.get('spellFeatures')
+                    spell_feats = np.zeros(64, dtype=np.float32)
+                    if sf is not None:
+                        sl = min(len(sf), 64)
+                        spell_feats[:sl] = np.array(
+                            sf[:sl], dtype=np.float32)
+
                     target_samples.append({
                         'global_features': gf,
                         'game_state_flat': flat,
@@ -284,6 +292,7 @@ def load_ppo_data(traj_dir):
                         'outcome': outcome,
                         'advantage': advantage,
                         'old_log_prob': old_lp,
+                        'spell_features': spell_feats,
                     })
 
                 elif dt == 'MULLIGAN':
@@ -328,7 +337,7 @@ def load_ppo_data(traj_dir):
 # ── PPO batch computation ────────────────────────────
 
 def compute_ppo_batch(model, head, samples, device,
-                      use_amp, clip_eps=0.2):
+                      use_amp, clip_eps=0.1):
     """
     Compute PPO loss for a batch of attack/block decisions.
 
@@ -455,7 +464,7 @@ def compute_ppo_batch(model, head, samples, device,
         total_loss = (
             policy_loss +
             0.5 * value_loss -
-            0.03 * entropy)
+            0.03 * entropy)  # attack: high exploration ok
 
     metrics = {
         'policy_loss': policy_loss.item(),
@@ -469,7 +478,7 @@ def compute_ppo_batch(model, head, samples, device,
 
 
 def compute_ppo_block_batch(model, samples, device,
-                            use_amp, clip_eps=0.2):
+                            use_amp, clip_eps=0.1):
     """
     Compute PPO loss for block decisions using the proper BlockHead.
 
@@ -630,7 +639,7 @@ def compute_ppo_block_batch(model, samples, device,
         value_loss = F.mse_loss(value, outcomes)
         entropy = total_entropy.mean()
 
-        total_loss = policy_loss + 0.5 * value_loss - 0.005 * entropy
+        total_loss = policy_loss + 0.5 * value_loss - 0.01 * entropy  # block: moderate
 
     metrics = {
         'policy_loss': policy_loss.item(),
@@ -645,7 +654,7 @@ def compute_ppo_block_batch(model, samples, device,
 
 def compute_ppo_priority_batch(model, head, samples,
                                device, use_amp,
-                               clip_eps=0.2):
+                               clip_eps=0.1):
     """
     Compute PPO loss for a batch of priority decisions.
 
@@ -762,7 +771,7 @@ def compute_ppo_priority_batch(model, head, samples,
         total_loss = (
             policy_loss +
             0.5 * value_loss -
-            0.03 * entropy)
+            0.01 * entropy)  # priority: mild exploration
 
     metrics = {
         'policy_loss': policy_loss.item(),
@@ -776,7 +785,7 @@ def compute_ppo_priority_batch(model, head, samples,
 
 
 def compute_ppo_target_batch(model, samples, device,
-                              use_amp, clip_eps=0.2):
+                              use_amp, clip_eps=0.1):
     """PPO loss for target selection (single-select softmax,
     same as priority but with 256-dim card features)."""
     bs = len(samples)
@@ -813,6 +822,8 @@ def compute_ppo_target_batch(model, samples, device,
     stm = torch.zeros(bs, 10, dtype=torch.bool,
                        device=device)
 
+    sf = torch.zeros(bs, 64, device=device)
+
     for i, s in enumerate(samples):
         nt = s['n_targets']
         tf[i, :nt] = torch.from_numpy(s['target_features'])
@@ -821,6 +832,9 @@ def compute_ppo_target_batch(model, samples, device,
         outcomes[i] = float(s['outcome'])
         gae_advantages[i] = float(s['advantage'])
         old_log_probs[i] = float(s['old_log_prob'])
+        spell = s.get('spell_features')
+        if spell is not None:
+            sf[i] = torch.from_numpy(spell)
 
         g, zones, masks_d = parse_game_state(
             s['game_state_flat'], s['global_features'])
@@ -843,7 +857,8 @@ def compute_ppo_target_batch(model, samples, device,
             gf, mb, mbm, ob, obm, h, hm,
             mg, mgm, og, ogm, st, stm)
         value = model.get_value(state.detach()).squeeze(-1)
-        logits = model.target_head(state, tf, tm)
+        logits = model.target_head(state, tf, tm,
+                                    spell_features=sf)
         dist = torch.distributions.Categorical(logits=logits)
         log_probs = dist.log_prob(actions)
 
@@ -870,7 +885,7 @@ def compute_ppo_target_batch(model, samples, device,
 
 
 def compute_ppo_mulligan_batch(model, samples, device,
-                                use_amp, clip_eps=0.2):
+                                use_amp, clip_eps=0.1):
     """PPO loss for mulligan (binary keep/mull)."""
     bs = len(samples)
     max_h = max(s['n_cards'] for s in samples)

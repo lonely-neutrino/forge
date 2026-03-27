@@ -295,6 +295,9 @@ def preprocess(files, output_dir, counts, max_cand,
         t_sel = np.lib.format.open_memmap(
             os.path.join(td, 'selected_idx.npy'),
             mode='w+', dtype=np.int32, shape=(n_tgt,))
+        t_spell = np.lib.format.open_memmap(
+            os.path.join(td, 'spell_features.npy'),
+            mode='w+', dtype=np.float32, shape=(n_tgt, 64))
     else:
         mt = 0
 
@@ -515,6 +518,13 @@ def preprocess(files, output_dir, counts, max_cand,
                     if si_val >= mt:
                         si_val = mt - 1
                     t_sel[ti] = si_val
+                    # Store spell features if present
+                    sf = rec.get('spellFeatures')
+                    if sf is not None:
+                        sl = min(len(sf), 64)
+                        t_spell[ti, :sl] = sanitize(
+                            np.array(sf[:sl],
+                                     dtype=np.float32))
                     ti += 1
 
                 elif dt == 'CARD_SELECTION' and n_cs > 0:

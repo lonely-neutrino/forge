@@ -96,6 +96,7 @@ public class ModelServerClient {
                 request.minSelections = context.getMinSelections();
                 request.maxSelections = context.getMaxSelections();
                 request.contextInfo = context.getContextInfo();
+                request.spellFeatures = context.getSpellFeatures();
 
                 String json = gson.toJson(request);
                 byte[] payload = json.getBytes(StandardCharsets.UTF_8);
@@ -148,6 +149,7 @@ public class ModelServerClient {
         int minSelections;
         int maxSelections;
         String contextInfo;
+        float[] spellFeatures; // 64-dim source spell features for targeting
     }
 
     /**

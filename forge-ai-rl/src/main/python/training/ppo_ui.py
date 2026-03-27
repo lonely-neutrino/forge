@@ -149,9 +149,8 @@ def ppo_thread(state, args):
             model = MTGModel().to(device)
         log(state, "Model loaded.")
 
-        # Freeze encoder — protect imitation-trained representations
-        for p in model.state_encoder.parameters():
-            p.requires_grad = False
+        # Unfreeze encoder with very low LR for adaptation
+        encoder_params = list(model.state_encoder.parameters())
 
         # Separate param groups with different learning rates
         head_params = (
@@ -165,9 +164,11 @@ def ppo_thread(state, args):
         value_params = list(model.value_network.parameters())
 
         optimizer = optim.AdamW([
-            {'params': head_params, 'lr': args.lr * 10},     # heads: 1e-4
+            {'params': encoder_params, 'lr': args.lr},        # encoder: 1e-5 (very slow)
+            {'params': head_params, 'lr': args.lr * 10},      # heads: 1e-4
             {'params': value_params, 'lr': args.lr * 30},     # value: 3e-4
         ], weight_decay=1e-5)
+        log(state, f"Encoder UNFROZEN at LR={args.lr:.1e}")
         scaler = (torch.amp.GradScaler('cuda')
                   if use_amp else None)
 

@@ -170,9 +170,11 @@ public class RLController {
      * @param targets list of legal target entities
      * @param min minimum targets to select
      * @param max maximum targets to select
+     * @param spellFeatures 64-dim feature vector of the source spell (null if unknown)
      * @return list of indices into targets
      */
-    public List<Integer> decideTargets(List<GameEntity> targets, int min, int max) {
+    public List<Integer> decideTargets(List<GameEntity> targets, int min, int max,
+                                        float[] spellFeatures) {
         if (targets.isEmpty()) return List.of();
 
         GameStateFeatures gameState = stateEncoder.encode(game, player);
@@ -189,13 +191,19 @@ public class RLController {
             }
         }
 
-        DecisionContext context = DecisionContext.multiSelect(
-                DecisionType.TARGET_SELECTION, gameState, candidates, min, max, "target_selection");
+        DecisionContext context = new DecisionContext(
+                DecisionType.TARGET_SELECTION, gameState, candidates, min, max,
+                "target_selection", spellFeatures);
 
         DecisionResult result = requestDecision(context);
         if (result == null) return List.of(0); // fallback: first target
         recordDecision(context, result);
         return result.getSelectedIndices();
+    }
+
+    /** Overload without spell features for backward compatibility. */
+    public List<Integer> decideTargets(List<GameEntity> targets, int min, int max) {
+        return decideTargets(targets, min, max, null);
     }
 
     /**
@@ -639,13 +647,22 @@ public class RLController {
                                       List<Integer> selected,
                                       List<float[]> candidateFeats,
                                       String info) {
+        recordDecisionDirect(type, numCandidates, selected, candidateFeats, info, null);
+    }
+
+    public void recordDecisionDirect(DecisionType type,
+                                      int numCandidates,
+                                      List<Integer> selected,
+                                      List<float[]> candidateFeats,
+                                      String info,
+                                      float[] spellFeatures) {
         if (trajectoryRecorder == null) return;
         try {
             GameStateFeatures gs = stateEncoder.encode(game, player);
             DecisionContext ctx = new DecisionContext(
                     type, gs,
                     candidateFeats != null ? candidateFeats : List.of(),
-                    selected.size(), numCandidates, info);
+                    selected.size(), numCandidates, info, spellFeatures);
             boolean isFallback = config.getMode() != RLModelMode.GRPC
                     && config.getMode() != RLModelMode.ONNX;
             DecisionResult res = new DecisionResult(

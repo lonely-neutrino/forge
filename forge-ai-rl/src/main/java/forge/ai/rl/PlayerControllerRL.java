@@ -127,7 +127,8 @@ public class PlayerControllerRL extends forge.ai.PlayerControllerAi {
                 // Clamp to available targets
                 maxTgts = Math.min(maxTgts, legalTargets.size());
                 minTgts = Math.min(minTgts, maxTgts);
-                List<Integer> targetIndices = rl.decideTargets(legalTargets, minTgts, maxTgts);
+                float[] spellFeats = ActionEncoder.encode(chosen);
+                List<Integer> targetIndices = rl.decideTargets(legalTargets, minTgts, maxTgts, spellFeats);
                 if (targetIndices.isEmpty()) {
                     priorityTargetingRejected++;
                     Logger.info("RL_SPELL_REJECTED: {} ({}) reason=model_returned_no_targets", spellName, apiName);
@@ -350,9 +351,10 @@ public class PlayerControllerRL extends forge.ai.PlayerControllerAi {
         String spellName = sa.getHostCard() != null ? sa.getHostCard().getName() : "unknown";
         String apiName = sa.getApi() != null ? sa.getApi().name() : "unknown";
 
+        float[] spellFeats = ActionEncoder.encode(sa);
         rl.recordDecisionDirect(DecisionType.TARGET_SELECTION,
                 candidates.size(), selectedIndices, feats,
-                "spell_target_" + spellName + "_" + apiName);
+                "spell_target_" + spellName + "_" + apiName, spellFeats);
     }
 
     // ===== TARGET SELECTION =====
@@ -368,9 +370,10 @@ public class PlayerControllerRL extends forge.ai.PlayerControllerAi {
 
         if (rl.isModelServerAvailable()
                 && optionList.size() > 1) {
-            // RL model picks the target
+            // RL model picks the target — pass spell features for context
             List<GameEntity> targets = new ArrayList<>(optionList);
-            List<Integer> selected = rl.decideTargets(targets, 1, 1);
+            float[] spellFeats = sa != null ? ActionEncoder.encode(sa) : null;
+            List<Integer> selected = rl.decideTargets(targets, 1, 1, spellFeats);
             int idx = 0; // default to first if model returns empty/invalid
             if (!selected.isEmpty()) {
                 idx = Math.max(0, Math.min(selected.get(0), optionList.size() - 1));
@@ -398,9 +401,10 @@ public class PlayerControllerRL extends forge.ai.PlayerControllerAi {
                     break;
                 }
             }
+            float[] spellFeats = sa != null ? ActionEncoder.encode(sa) : null;
             rl.recordDecisionDirect(DecisionType.TARGET_SELECTION,
                     optionList.size(), List.of(idx), feats,
-                    "target_" + title);
+                    "target_" + title, spellFeats);
         }
         return result;
     }
