@@ -40,6 +40,7 @@ except ImportError:
     HAS_MPL = False
 
 from training.ppo_trainer import PROJECT_ROOT, FORGE_JAR
+from training.deck_config import load_rl_decks
 
 import subprocess
 
@@ -238,8 +239,8 @@ def collect_thread(state, args):
         log(state, f"Output: {output_dir}")
         log(state, f"Games: {args.games}, Threads: 16")
 
-        decks = ['Green Stompy.dck', 'White Weenie.dck',
-                 'Blue Tempo.dck', 'Red Aggro.dck']
+        decks = load_rl_decks(overrides=args.deck)
+        log(state, f"Decks: {', '.join(decks)}")
         deck_args = []
         for d in decks:
             deck_args.extend(['-d', d])
@@ -614,6 +615,9 @@ def main():
     parser.add_argument('--clean', action='store_true',
                         help='Delete old trajectories and '
                              'preprocessed data before collecting')
+    parser.add_argument('--deck', action='append',
+                        help='Override the configured RL deck list '
+                             '(may be repeated)')
     args = parser.parse_args()
 
     state = CollectState()

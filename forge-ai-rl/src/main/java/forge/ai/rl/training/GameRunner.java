@@ -145,7 +145,14 @@ public class GameRunner {
             for (Player p : game.getPlayers()) {
                 if (p.getController() instanceof PlayerControllerRL) {
                     rlPlayer = p;
-                    ((PlayerControllerRL) p.getController()).getRLController().onGameStart(gameId);
+                    boolean isRlPerspective = "RL_Player".equals(p.getName());
+                    ((PlayerControllerRL) p.getController()).getRLController().onGameStart(
+                            gameId,
+                            gameId,
+                            p.getName(),
+                            isRlPerspective ? "Heuristic_AI" : "RL_Player",
+                            isRlPerspective && rlDeck != null ? rlDeck.getName() : aiDeck != null ? aiDeck.getName() : null,
+                            isRlPerspective && aiDeck != null ? aiDeck.getName() : rlDeck != null ? rlDeck.getName() : null);
                     break;
                 }
             }
@@ -203,7 +210,14 @@ public class GameRunner {
         // Notify both players
         for (Player p : game.getPlayers()) {
             if (p.getController() instanceof PlayerControllerRL) {
-                ((PlayerControllerRL) p.getController()).getRLController().onGameStart(gameId + "_" + p.getName());
+                boolean isPlayerOnePerspective = "Player1".equals(p.getName());
+                ((PlayerControllerRL) p.getController()).getRLController().onGameStart(
+                        gameId + "_" + p.getName(),
+                        gameId,
+                        p.getName(),
+                        isPlayerOnePerspective ? "Player2" : "Player1",
+                        isPlayerOnePerspective && deck1 != null ? deck1.getName() : deck2 != null ? deck2.getName() : null,
+                        isPlayerOnePerspective && deck2 != null ? deck2.getName() : deck1 != null ? deck1.getName() : null);
             }
         }
 

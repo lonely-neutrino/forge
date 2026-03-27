@@ -23,10 +23,16 @@ import java.util.UUID;
  * File format: one JSON object per line (JSONL), with a header line and one line per decision.
  */
 public class TrajectoryRecorder {
+    private static final String METADATA_FILENAME = "game_metadata.jsonl";
     private final String outputDir;
     private final Gson gson;
     private final List<DecisionRecord> currentGame;
     private String gameId;
+    private String matchId;
+    private String playerName;
+    private String opponentName;
+    private String playerDeck;
+    private String opponentDeck;
     private long gameStartTime;
 
     // Running state for reward shaping
@@ -51,7 +57,24 @@ public class TrajectoryRecorder {
      * Start recording a new game.
      */
     public void startGame(String gameId) {
+        startGame(gameId, null, null, null, null, null);
+    }
+
+    /**
+     * Start recording a new game with optional deck metadata.
+     */
+    public void startGame(String gameId,
+                          String matchId,
+                          String playerName,
+                          String opponentName,
+                          String playerDeck,
+                          String opponentDeck) {
         this.gameId = gameId;
+        this.matchId = matchId;
+        this.playerName = playerName;
+        this.opponentName = opponentName;
+        this.playerDeck = playerDeck;
+        this.opponentDeck = opponentDeck;
         this.gameStartTime = System.currentTimeMillis();
         this.currentGame.clear();
         this.prevLifeAdvantage = 0;
@@ -140,11 +163,39 @@ public class TrajectoryRecorder {
             Logger.info("Wrote trajectory: {} ({} decisions, {})",
                     filePath.getFileName(), currentGame.size(), won ? "WIN" : "LOSS");
 
+            appendMetadata(filePath.getFileName().toString(), won);
+
         } catch (IOException e) {
             Logger.error("Failed to write trajectory file: {}", e.getMessage());
         }
 
         currentGame.clear();
+    }
+
+    private void appendMetadata(String trajectoryFile, boolean won) {
+        TrajectoryMetadata metadata = new TrajectoryMetadata();
+        metadata.gameId = gameId;
+        metadata.matchId = matchId;
+        metadata.playerName = playerName;
+        metadata.opponentName = opponentName;
+        metadata.playerDeck = playerDeck;
+        metadata.opponentDeck = opponentDeck;
+        metadata.won = won;
+        metadata.trajectoryFile = trajectoryFile;
+        metadata.timestamp = gameStartTime;
+
+        Path metadataPath = Paths.get(outputDir, METADATA_FILENAME);
+        synchronized (TrajectoryRecorder.class) {
+            try (BufferedWriter writer = Files.newBufferedWriter(
+                    metadataPath,
+                    java.nio.file.StandardOpenOption.CREATE,
+                    java.nio.file.StandardOpenOption.APPEND)) {
+                writer.write(gson.toJson(metadata));
+                writer.newLine();
+            } catch (IOException e) {
+                Logger.error("Failed to append trajectory metadata: {}", e.getMessage());
+            }
+        }
     }
 
     /**
@@ -161,6 +212,18 @@ public class TrajectoryRecorder {
         boolean won;
         int totalDecisions;
         long durationMs;
+    }
+
+    private static class TrajectoryMetadata {
+        String gameId;
+        String matchId;
+        String playerName;
+        String opponentName;
+        String playerDeck;
+        String opponentDeck;
+        boolean won;
+        String trajectoryFile;
+        long timestamp;
     }
 
     private static class DecisionRecord {

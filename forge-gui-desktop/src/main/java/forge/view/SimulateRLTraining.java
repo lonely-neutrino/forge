@@ -590,12 +590,21 @@ public class SimulateRLTraining {
         // removed from game.getPlayers() after game ends)
         Map<LobbyPlayer, Player> lobbyToPlayer = new HashMap<>();
         String gameId = name1 + "_vs_" + name2;
+        String deck1Name = deck1 != null ? deck1.getName() : null;
+        String deck2Name = deck2 != null ? deck2.getName() : null;
         for (Player p : game.getPlayers()) {
             lobbyToPlayer.put(p.getLobbyPlayer(), p);
             if (p.getController() instanceof PlayerControllerRL) {
+                boolean isPlayerOnePerspective = name1.equals(p.getName());
                 ((PlayerControllerRL) p.getController())
                     .getRLController()
-                    .onGameStart(gameId + "_" + p.getName());
+                    .onGameStart(
+                            gameId + "_" + p.getName(),
+                            gameId,
+                            p.getName(),
+                            isPlayerOnePerspective ? name2 : name1,
+                            isPlayerOnePerspective ? deck1Name : deck2Name,
+                            isPlayerOnePerspective ? deck2Name : deck1Name);
             }
         }
 

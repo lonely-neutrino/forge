@@ -45,6 +45,7 @@ from model.mtg_model import MTGModel
 from model.gpu_config import auto_detect_profile
 from serving.model_server import ModelServer
 from training.mmap_dataset import parse_game_state, GAME_STATE_DIM, CARD_DIM, GLOBAL_DIM, ZONES_CONFIG
+from training.deck_config import load_rl_decks
 
 import threading
 
@@ -56,8 +57,6 @@ FORGE_JAR = os.path.join(
     PROJECT_ROOT,
     'forge-gui-desktop/target/'
     'forge-gui-desktop-2.0.12-SNAPSHOT-jar-with-dependencies.jar')
-DECKS = ['Green Stompy.dck', 'White Weenie.dck',
-         'Blue Tempo.dck', 'Red Aggro.dck']
 
 
 # ── Data loading for PPO ─────────────────────────────
@@ -982,7 +981,8 @@ def run_games(n_games, traj_dir, mode='evaluate',
               progress_callback=None,
               log_callback=None,
               threads=4,
-              java_procs=1):
+              java_procs=1,
+              decks=None):
     """Run games via Java subprocess(es).
     Raises ModelServerError if the server is detected as down.
     progress_callback(completed, total) called as games complete.
@@ -997,18 +997,19 @@ def run_games(n_games, traj_dir, mode='evaluate',
         return _run_games_multi(
             n_games, traj_dir, mode, port, quiet,
             progress_callback, log_callback, threads,
-            java_procs)
+            java_procs, decks)
 
     return _run_games_single(
         n_games, traj_dir, mode, port, quiet,
-        progress_callback, log_callback, threads)
+        progress_callback, log_callback, threads, decks)
 
 
 def _build_java_cmd(n_games, traj_dir, mode, port_str,
-                    threads, heap='3g'):
+                    threads, heap='3g', decks=None):
     """Build the Java command for a single process."""
+    decks = decks or load_rl_decks()
     deck_args = []
-    for d in DECKS:
+    for d in decks:
         deck_args.extend(['-d', d])
 
     return [
@@ -1036,7 +1037,7 @@ def _build_java_cmd(n_games, traj_dir, mode, port_str,
 
 def _run_games_single(n_games, traj_dir, mode, port,
                       quiet, progress_callback,
-                      log_callback, threads):
+                      log_callback, threads, decks):
     """Run games in a single Java process."""
     if isinstance(port, (list, tuple)):
         port_str = ','.join(str(p) for p in port)
@@ -1044,7 +1045,8 @@ def _run_games_single(n_games, traj_dir, mode, port,
         port_str = str(port)
 
     cmd = _build_java_cmd(n_games, traj_dir, mode,
-                          port_str, threads, heap='12g')
+                          port_str, threads, heap='12g',
+                          decks=decks)
     cwd = os.path.join(PROJECT_ROOT, 'forge-gui-desktop')
 
     proc = subprocess.Popen(
@@ -1076,7 +1078,8 @@ def _run_games_single(n_games, traj_dir, mode, port,
 
 def _run_games_multi(n_games, traj_dir, mode, port,
                      quiet, progress_callback,
-                     log_callback, threads, java_procs):
+                     log_callback, threads, java_procs,
+                     decks):
     """Run games across multiple Java processes."""
     if isinstance(port, (list, tuple)):
         port_str = ','.join(str(p) for p in port)
@@ -1098,7 +1101,7 @@ def _run_games_multi(n_games, traj_dir, mode, port,
             continue
         cmd = _build_java_cmd(ng, traj_dir, mode,
                               port_str, threads_per,
-                              heap=heap_str)
+                              heap=heap_str, decks=decks)
         proc = subprocess.Popen(
             cmd, cwd=cwd, stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT, text=True)
@@ -1287,6 +1290,9 @@ def main():
         help='Evaluation games per round')
     parser.add_argument('--port', type=int, default=0,
         help='Model server port (0=auto)')
+    parser.add_argument('--deck', action='append',
+        help='Override the configured RL deck list '
+             '(may be repeated)')
     args = parser.parse_args()
 
     profile = auto_detect_profile()
@@ -1294,6 +1300,7 @@ def main():
         'cuda' if torch.cuda.is_available() else 'cpu')
     use_amp = profile.use_amp and device.startswith('cuda')
     port = args.port or find_free_port()
+    decks = load_rl_decks(overrides=args.deck)
 
     os.makedirs(args.save_dir, exist_ok=True)
     os.makedirs(args.traj_dir, exist_ok=True)
@@ -1312,6 +1319,7 @@ def main():
     print(f'  PPO epochs: {args.ppo_epochs}', flush=True)
     print(f'  Eval games: {args.eval_games}', flush=True)
     print(f'  Server port: {port}', flush=True)
+    print(f"  Decks: {', '.join(decks)}", flush=True)
 
     # Load model
     print(f'\n  Loading model: {args.checkpoint}',
@@ -1357,7 +1365,8 @@ def main():
         try:
             _, stdout = run_games(
                 args.games_per_round, args.traj_dir,
-                mode='evaluate', port=port)
+                mode='evaluate', port=port,
+                decks=decks)
         except ModelServerError as e:
             print(f'\n  FATAL: {e}', flush=True)
             print('  Stopping PPO — model server is down.',
@@ -1496,7 +1505,8 @@ def main():
         try:
             eval_wr, _ = run_games(
                 args.eval_games, args.traj_dir + '_eval',
-                mode='evaluate', port=port)
+                mode='evaluate', port=port,
+                decks=decks)
             eval_wr = eval_wr or 0.0
         except ModelServerError as e:
             print(f'\n  FATAL: {e}', flush=True)

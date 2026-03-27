@@ -3,12 +3,17 @@ package forge.screens.home;
 import java.awt.Font;
 import java.awt.event.ActionListener;
 import java.awt.event.ItemEvent;
+import java.io.File;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.Vector;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import javax.swing.*;
 import javax.swing.event.ListSelectionListener;
@@ -214,9 +219,69 @@ public class VLobby implements ILobbyView {
         return playerPanels.get(slot);
     }
 
-    /** RL AI supported deck names — must match files in constructed deck folder */
-    private static final java.util.Set<String> RL_SUPPORTED_DECKS = new java.util.HashSet<>(
+    /** RL AI supported deck names — loaded from rl_data/rl_decks.json when available. */
+    private static final Set<String> DEFAULT_RL_SUPPORTED_DECKS = new LinkedHashSet<>(
             java.util.Arrays.asList("Red Aggro", "Green Stompy", "White Weenie", "Blue Tempo"));
+    private static final Set<String> RL_SUPPORTED_DECKS = loadRlSupportedDecks();
+
+    private static Set<String> loadRlSupportedDecks() {
+        final LinkedHashSet<String> seenPaths = new LinkedHashSet<>();
+        final List<File> candidates = new ArrayList<>();
+        final String userDir = System.getProperty("user.dir");
+        final File cwd = new File(userDir);
+        candidates.add(new File(cwd, "rl_data/rl_decks.json"));
+        candidates.add(new File(cwd, "../rl_data/rl_decks.json"));
+        candidates.add(new File(cwd, "../../rl_data/rl_decks.json"));
+
+        for (final File file : candidates) {
+            final String absPath = file.getAbsolutePath();
+            if (!seenPaths.add(absPath) || !file.exists()) {
+                continue;
+            }
+            try {
+                final Set<String> decks = parseRlDeckConfig(file);
+                System.out.println("[RL] Loaded RL deck config from " + absPath + ": " + decks);
+                return decks;
+            } catch (final Exception ex) {
+                System.out.println("[RL] WARNING: Failed to load RL deck config from "
+                        + absPath + ": " + ex.getMessage());
+            }
+        }
+
+        System.out.println("[RL] WARNING: Falling back to built-in RL decks: "
+                + DEFAULT_RL_SUPPORTED_DECKS);
+        return new LinkedHashSet<>(DEFAULT_RL_SUPPORTED_DECKS);
+    }
+
+    private static Set<String> parseRlDeckConfig(final File file) {
+        final String json = FileUtil.readFileToString(file);
+        final Matcher sectionMatcher = Pattern.compile("\"decks\"\\s*:\\s*\\[(.*?)\\]",
+                Pattern.DOTALL).matcher(json);
+        if (!sectionMatcher.find()) {
+            throw new IllegalArgumentException("missing 'decks' array");
+        }
+
+        final LinkedHashSet<String> deckNames = new LinkedHashSet<>();
+        final Matcher deckMatcher = Pattern.compile("\"([^\"]+)\"")
+                .matcher(sectionMatcher.group(1));
+        while (deckMatcher.find()) {
+            final String raw = deckMatcher.group(1).trim();
+            if (!raw.isEmpty()) {
+                deckNames.add(stripDeckExtension(raw));
+            }
+        }
+        if (deckNames.isEmpty()) {
+            throw new IllegalArgumentException("config contains no decks");
+        }
+        return deckNames;
+    }
+
+    private static String stripDeckExtension(final String deckName) {
+        if (deckName.toLowerCase().endsWith(".dck")) {
+            return deckName.substring(0, deckName.length() - 4);
+        }
+        return deckName;
+    }
 
     private void filterToRlDecks(final FDeckChooser deckChooser) {
         final Iterable<DeckProxy> allDecks = DeckProxy.getAllConstructedDecks();

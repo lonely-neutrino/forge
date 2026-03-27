@@ -1,18 +1,62 @@
 #!/bin/bash
 # Step 3: Train value network (game state encoder)
-# Usage: 03_train_value.sh [epochs] [batch_size] [max_files]
-# max_files: limit trajectory files loaded (default 500 to avoid OOM with 16GB RAM)
+# Usage: 03_train_value.sh [epochs] [batch_size]
 set -e
-cd /home/maustin/forge/forge-ai-rl/src/main/python
-source /home/maustin/forge/forge-ai-rl/venv/bin/activate
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+PYTHON_DIR="$PROJECT_ROOT/forge-ai-rl/src/main/python"
+VENV_PY="$PROJECT_ROOT/forge-ai-rl/venv/bin/python3"
+VENV_PY_WIN="$PROJECT_ROOT/forge-ai-rl/venv/Scripts/python.exe"
+if command -v cygpath >/dev/null 2>&1; then
+    USERPROFILE_UNIX="$(cygpath "$USERPROFILE" 2>/dev/null || printf '%s' "$USERPROFILE")"
+    CONDA_PREFIX_UNIX="$(cygpath "$CONDA_PREFIX" 2>/dev/null || printf '%s' "$CONDA_PREFIX")"
+else
+    USERPROFILE_UNIX="$USERPROFILE"
+    CONDA_PREFIX_UNIX="$CONDA_PREFIX"
+fi
+CONDA_PY="$CONDA_PREFIX_UNIX/python"
+CONDA_PY_WIN="$CONDA_PREFIX_UNIX/python.exe"
+FORGE_RL_CONDA_WIN="$USERPROFILE_UNIX/anaconda3/envs/forge_rl/python.exe"
+
+if [ -x "$VENV_PY" ]; then
+    PYTHON="$VENV_PY"
+elif [ -f "$VENV_PY_WIN" ]; then
+    PYTHON="$VENV_PY_WIN"
+elif [ -n "$CONDA_PREFIX" ] && [ -x "$CONDA_PY" ]; then
+    PYTHON="$CONDA_PY"
+elif [ -n "$CONDA_PREFIX" ] && [ -f "$CONDA_PY_WIN" ]; then
+    PYTHON="$CONDA_PY_WIN"
+elif [ -n "$USERPROFILE" ] && [ -f "$FORGE_RL_CONDA_WIN" ]; then
+    PYTHON="$FORGE_RL_CONDA_WIN"
+elif command -v python3 >/dev/null 2>&1; then
+    PYTHON="python3"
+elif command -v python >/dev/null 2>&1; then
+    PYTHON="python"
+else
+    echo "No Python interpreter found."
+    exit 1
+fi
+
+cd "$PYTHON_DIR"
 
 EPOCHS=${1:-100}
 BATCH=${2:-256}
+DATA_DIR="$PROJECT_ROOT/rl_data/trajectories"
+SAVE_DIR="$PROJECT_ROOT/rl_data/checkpoints"
+if [[ "$PYTHON" == *.exe ]] && command -v cygpath >/dev/null 2>&1; then
+    DATA_DIR_PY="$(cygpath -m "$DATA_DIR")"
+    SAVE_DIR_PY="$(cygpath -m "$SAVE_DIR")"
+else
+    DATA_DIR_PY="$DATA_DIR"
+    SAVE_DIR_PY="$SAVE_DIR"
+fi
+DEVICE=$("$PYTHON" -c "import torch; print('cuda' if torch.cuda.is_available() else 'cpu')" 2>/dev/null || echo cpu)
 
 echo "Training value network for $EPOCHS epochs, batch=$BATCH (chunked loading)..."
-python training/training_ui.py \
-    --data-dir /home/maustin/forge/rl_data/trajectories \
-    --save-dir /home/maustin/forge/rl_data/checkpoints \
-    --device cuda \
+echo "Device: $DEVICE"
+"$PYTHON" training/training_ui.py \
+    --data-dir "$DATA_DIR_PY" \
+    --save-dir "$SAVE_DIR_PY" \
+    --device "$DEVICE" \
     --epochs "$EPOCHS" \
     --batch-size "$BATCH"

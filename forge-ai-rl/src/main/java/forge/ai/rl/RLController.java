@@ -104,8 +104,19 @@ public class RLController {
      * Start a new game — initialize trajectory recording.
      */
     public void onGameStart(String gameId) {
+        onGameStart(gameId, null, null, null, null, null);
+    }
+
+    public void onGameStart(String gameId,
+                            String matchId,
+                            String playerName,
+                            String opponentName,
+                            String playerDeck,
+                            String opponentDeck) {
         if (trajectoryRecorder != null) {
-            trajectoryRecorder.startGame(gameId);
+            trajectoryRecorder.startGame(
+                    gameId, matchId, playerName, opponentName,
+                    playerDeck, opponentDeck);
         }
         if (config.getMode() == RLModelMode.GRPC) {
             modelClient.connect();

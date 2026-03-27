@@ -111,6 +111,7 @@ def ppo_thread(state, args):
             run_games, start_model_server,
             find_free_port,
             ModelServerError, PROJECT_ROOT)
+        from training.deck_config import load_rl_decks
         from training.mmap_dataset import (
             parse_game_state, CARD_DIM, GLOBAL_DIM,
             ZONES_CONFIG)
@@ -131,11 +132,13 @@ def ppo_thread(state, args):
         state.device = device
         state.gpu_name = profile.name
         state.total_rounds = args.rounds
+        decks = load_rl_decks(overrides=args.deck)
 
         log(state, f"Device: {device} ({profile.name})")
         log(state, f"Port: {port}")
         log(state, f"Rounds: {args.rounds}, "
             f"Games/round: {args.games_per_round}")
+        log(state, f"Decks: {', '.join(decks)}")
 
         # Load model
         log(state, f"Loading: {args.checkpoint}")
@@ -266,7 +269,8 @@ def ppo_thread(state, args):
                     progress_callback=on_progress,
                     threads=args.threads,
                     java_procs=args.java_procs,
-                    log_callback=on_java_log)
+                    log_callback=on_java_log,
+                    decks=decks)
             except ModelServerError as e:
                 log(state, f"  FATAL: {e}")
                 log(state, "  Stopping PPO — model server "
@@ -596,7 +600,8 @@ def ppo_thread(state, args):
                         mode='evaluate', port=port_arg,
                         log_callback=on_java_log,
                         threads=args.threads,
-                        java_procs=args.java_procs)
+                        java_procs=args.java_procs,
+                        decks=decks)
                     eval_wr = eval_wr or 0.0
                 except ModelServerError as e:
                     log(state, f"  FATAL: {e}")
@@ -940,6 +945,9 @@ def main():
         default=1,
         help='Eval vs heuristic every N rounds '
              '(selfplay mode, default: 1)')
+    parser.add_argument('--deck', action='append',
+        help='Override the configured RL deck list '
+             '(may be repeated)')
     args = parser.parse_args()
 
     state = PPOState()
