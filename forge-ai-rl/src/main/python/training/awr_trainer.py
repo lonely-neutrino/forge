@@ -264,14 +264,14 @@ def log(state, msg):
 
 def awr_thread(state, args):
     try:
-        profile = auto_detect_profile()
+        profile = auto_detect_profile(args.device)
         backend = resolve_backend(args.device)
         device = backend.torch_device
         use_amp = profile.use_amp and backend.use_amp
         port = args.port or find_free_port()
 
         state.device = backend.name
-        state.gpu_name = profile.name
+        state.gpu_name = f'{backend.name} ({profile.name})'
         state.total_rounds = args.rounds
 
         log(state, f"=== AWR Offline RL Training ===")

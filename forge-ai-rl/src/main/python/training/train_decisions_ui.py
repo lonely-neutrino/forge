@@ -2045,13 +2045,13 @@ def train_joint_mmap(model, head_configs, args, state,
 
 def trainer_thread(state, args):
     try:
-        profile = auto_detect_profile()
+        profile = auto_detect_profile(args.device)
         backend = resolve_backend(args.device)
         device = backend.torch_device
         use_amp = profile.use_amp and backend.use_amp
 
         state.device = backend.name
-        state.gpu_name = profile.name
+        state.gpu_name = f'{backend.name} ({profile.name})'
         state.total_epochs = args.epochs
 
         # Load data via mmap or fallback to JSONL

@@ -115,10 +115,10 @@ def get_profile(name: str = 'rtx3080') -> GPUProfile:
     return PROFILES.get(name.lower(), RTX_3080)
 
 
-def auto_detect_profile() -> GPUProfile:
+def auto_detect_profile(requested_device: str | None = None) -> GPUProfile:
     """Auto-detect GPU and return appropriate profile."""
     try:
-        backend = resolve_backend()
+        backend = resolve_backend(requested_device)
         if backend.is_dml:
             return DIRECTML_GPU
         if not backend.is_cuda:

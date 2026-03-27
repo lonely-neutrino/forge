@@ -395,7 +395,7 @@ def main():
     args = parser.parse_args()
 
     # Setup
-    profile = auto_detect_profile()
+    profile = auto_detect_profile(args.device)
     backend = resolve_backend(args.device)
     device = backend.torch_device
     batch_size = args.batch_size or profile.batch_size

@@ -710,7 +710,7 @@ def main():
         help='Comma-separated heads to train')
     args = parser.parse_args()
 
-    profile = auto_detect_profile()
+    profile = auto_detect_profile(args.device)
     backend = resolve_backend(args.device)
     device = backend.torch_device
     use_amp = profile.use_amp and backend.use_amp

@@ -294,7 +294,7 @@ def main():
     os.makedirs(args.save_dir, exist_ok=True)
 
     # Auto-detect GPU
-    profile = auto_detect_profile()
+    profile = auto_detect_profile(args.device)
     if args.gpu_profile:
         from model.gpu_config import get_profile
         profile = get_profile(args.gpu_profile)

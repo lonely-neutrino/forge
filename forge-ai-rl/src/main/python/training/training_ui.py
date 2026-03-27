@@ -243,14 +243,14 @@ class SimpleDataset(torch.utils.data.Dataset):
 def trainer_thread(state: TrainingState, args):
     """Runs training in background thread, updating state."""
     try:
-        profile = auto_detect_profile()
+        profile = auto_detect_profile(args.device)
         backend = resolve_backend(args.device)
         device = backend.torch_device
         batch_size = args.batch_size or profile.batch_size
         use_amp = profile.use_amp and backend.use_amp
 
-        state.device = backend.name
-        state.gpu_name = profile.name
+        state.device = backend.display_name
+        state.gpu_name = f'{backend.name} ({profile.name})'
         state.batch_size = batch_size
         state.total_epochs = args.epochs
 
@@ -653,7 +653,7 @@ class TrainingDashboard:
             f"{s.eta:.0f}s" if s.eta > 0 else "—")
         self.stat_vars['Samples'].set(
             f"{s.n_train}+{s.n_val}")
-        self.stat_vars['Device'].set(s.gpu_name or s.device)
+        self.stat_vars['Device'].set(s.device or s.gpu_name)
         self.stat_vars['Parameters'].set(
             f"{s.model_params:,}" if s.model_params else "—")
 
