@@ -1,6 +1,6 @@
 #!/bin/bash
 # Step 4: Train attack/block/priority decision heads (imitation learning)
-# Usage: 04_train_decisions.sh [epochs] [batch_size] [encoder] [heads]
+# Usage: 04_train_decisions.sh [epochs] [batch_size] [encoder] [heads] [device]
 # heads: "all" (default), or comma-separated: "priority", "attack,block", etc.
 set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -44,8 +44,13 @@ EPOCHS=${1:-10}
 BATCH=${2:-256}
 CKPT_DIR="$PROJECT_ROOT/rl_data/checkpoints"
 HEADS=${4:-all}
+DEVICE_ARG=${5:-}
 DATA_DIR="$PROJECT_ROOT/rl_data/trajectories"
-DEVICE=$("$PYTHON" -c "import torch; print('cuda' if torch.cuda.is_available() else 'cpu')" 2>/dev/null || echo cpu)
+if [ -n "$DEVICE_ARG" ]; then
+    DEVICE="$DEVICE_ARG"
+else
+    DEVICE=$("$PYTHON" -c "import sys; sys.path.insert(0, r'$PYTHON_DIR'); from model.backend import auto_device_name; print(auto_device_name())" 2>/dev/null || echo cpu)
+fi
 if [[ "$PYTHON" == *.exe ]] && command -v cygpath >/dev/null 2>&1; then
     DATA_DIR_PY="$(cygpath -m "$DATA_DIR")"
     CKPT_DIR_PY="$(cygpath -m "$CKPT_DIR")"

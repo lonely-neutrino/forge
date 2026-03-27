@@ -44,6 +44,7 @@ except ImportError:
     HAS_MATPLOTLIB = False
 
 from model.mtg_model import MTGModel
+from model.backend import is_cuda_device, resolve_backend
 from model.gpu_config import auto_detect_profile
 from training.mmap_dataset import parse_game_state, GAME_STATE_DIM, CARD_DIM, GLOBAL_DIM, ZONES_CONFIG
 
@@ -1069,7 +1070,7 @@ def train_block_head(model, head, samples, args,
         state.epoch_progress = 1.0
         state.chart_dirty = True
 
-        if device.startswith('cuda'):
+        if is_cuda_device(device):
             torch.cuda.synchronize()
             state.gpu_mem_used_mb = (
                 torch.cuda.memory_allocated() / 1024**2)
@@ -1217,7 +1218,7 @@ def train_priority_head(model, head, samples, args,
         state.epoch_progress = 1.0
         state.chart_dirty = True
 
-        if device.startswith('cuda'):
+        if is_cuda_device(device):
             torch.cuda.synchronize()
             state.gpu_mem_used_mb = (
                 torch.cuda.memory_allocated() / 1024**2)
@@ -1371,7 +1372,7 @@ def train_head(model, head, head_name, samples, args,
         state.epoch_progress = 1.0
         state.chart_dirty = True
 
-        if device.startswith('cuda'):
+        if is_cuda_device(device):
             torch.cuda.synchronize()
             state.gpu_mem_used_mb = (
                 torch.cuda.memory_allocated() / 1024**2)
@@ -1529,7 +1530,7 @@ def train_head_mmap(model, head, head_name,
         state.epoch_progress = 1.0
         state.chart_dirty = True
 
-        if device.startswith('cuda'):
+        if is_cuda_device(device):
             torch.cuda.synchronize()
             state.gpu_mem_used_mb = (
                 torch.cuda.memory_allocated() / 1024**2)
@@ -1686,7 +1687,7 @@ def train_priority_head_mmap(model, head,
         state.epoch_progress = 1.0
         state.chart_dirty = True
 
-        if device.startswith('cuda'):
+        if is_cuda_device(device):
             torch.cuda.synchronize()
             state.gpu_mem_used_mb = (
                 torch.cuda.memory_allocated() / 1024**2)
@@ -1702,12 +1703,11 @@ def train_priority_head_mmap(model, head,
 def trainer_thread(state, args):
     try:
         profile = auto_detect_profile()
-        device = args.device or (
-            'cuda' if torch.cuda.is_available() else 'cpu')
-        use_amp = profile.use_amp and device.startswith(
-            'cuda')
+        backend = resolve_backend(args.device)
+        device = backend.torch_device
+        use_amp = profile.use_amp and backend.use_amp
 
-        state.device = device
+        state.device = backend.name
         state.gpu_name = profile.name
         state.total_epochs = args.epochs
 
@@ -1861,13 +1861,13 @@ def trainer_thread(state, args):
         # Load model
         state.phase = "training"
         state.status = "Loading encoder..."
-        log(state, f"\nDevice: {device} ({state.gpu_name})")
+        log(state, f"\nDevice: {state.device} ({state.gpu_name})")
         log(state, f"AMP: {use_amp}")
         if os.path.exists(args.encoder_checkpoint):
             log(state, f"Loading encoder: "
                 f"{args.encoder_checkpoint}")
             model = MTGModel.load(
-                args.encoder_checkpoint, device=device)
+                args.encoder_checkpoint, device=backend.name)
             log(state, "Encoder loaded.")
         else:
             log(state, "No checkpoint — random init")

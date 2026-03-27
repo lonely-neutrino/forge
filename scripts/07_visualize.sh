@@ -1,5 +1,6 @@
 #!/bin/bash
 # Step 7: Visualize game states and model predictions
+# Usage: 07_visualize.sh [model] [data_dir] [device]
 set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -40,6 +41,7 @@ cd "$PYTHON_DIR"
 
 MODEL=${1:-"$PROJECT_ROOT/rl_data/checkpoints/best_value_model.pt"}
 DATA=${2:-"$PROJECT_ROOT/rl_data/trajectories"}
+DEVICE_ARG=${3:-}
 if [[ "$PYTHON" == *.exe ]] && command -v cygpath >/dev/null 2>&1; then
     MODEL_PY="$(cygpath -m "$MODEL")"
     DATA_PY="$(cygpath -m "$DATA")"
@@ -47,7 +49,11 @@ else
     MODEL_PY="$MODEL"
     DATA_PY="$DATA"
 fi
-DEVICE=$("$PYTHON" -c "import torch; print('cuda' if torch.cuda.is_available() else 'cpu')" 2>/dev/null || echo cpu)
+if [ -n "$DEVICE_ARG" ]; then
+    DEVICE="$DEVICE_ARG"
+else
+    DEVICE=$("$PYTHON" -c "import sys; sys.path.insert(0, r'$PYTHON_DIR'); from model.backend import auto_device_name; print(auto_device_name())" 2>/dev/null || echo cpu)
+fi
 
 echo "Launching visualizer..."
 echo "  Model: $MODEL"

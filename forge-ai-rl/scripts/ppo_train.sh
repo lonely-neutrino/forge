@@ -18,11 +18,13 @@ if [ ! -f "$CHECKPOINT" ]; then
     exit 1
 fi
 
+DEVICE=$("$PYTHON" -c "import sys; sys.path.insert(0, r'$PYTHON_DIR'); from model.backend import auto_device_name; print(auto_device_name())" 2>/dev/null || echo cpu)
+
 cd "$PYTHON_DIR"
 "$PYTHON" training/ppo_ui.py \
     --checkpoint "$CHECKPOINT" \
     --save-dir "$SAVE_DIR" \
-    --device cuda \
+    --device "$DEVICE" \
     --rounds "$ROUNDS" \
     --games-per-round "$GAMES" \
     --eval-games 50

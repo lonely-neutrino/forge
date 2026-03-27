@@ -9,6 +9,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from .game_state_encoder import _make_transformer_encoder
+
 
 class AttackHead(nn.Module):
     """
@@ -33,7 +35,7 @@ class AttackHead(nn.Module):
             batch_first=True,
             activation='gelu'
         )
-        self.attacker_attention = nn.TransformerEncoder(encoder_layer, num_layers=2)
+        self.attacker_attention = _make_transformer_encoder(encoder_layer, 2)
 
         # Binary classifier per creature: attack or not
         self.attack_classifier = nn.Sequential(

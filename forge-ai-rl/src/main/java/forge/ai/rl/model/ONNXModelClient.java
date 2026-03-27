@@ -9,6 +9,7 @@ import forge.ai.rl.features.GameStateFeatures;
 import org.tinylog.Logger;
 
 import java.io.File;
+import java.lang.reflect.Method;
 import java.nio.FloatBuffer;
 import java.util.*;
 
@@ -74,6 +75,7 @@ public class ONNXModelClient {
             env = OrtEnvironment.getEnvironment();
             OrtSession.SessionOptions opts = new OrtSession.SessionOptions();
             opts.setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT);
+            configureExecutionProvider(opts);
 
             Logger.info("Loading ONNX models from: {}", modelDir);
             stateEncoder = env.createSession(modelDir + "/state_encoder.onnx", opts);
@@ -97,6 +99,50 @@ public class ONNXModelClient {
 
     public boolean isLoaded() {
         return loaded;
+    }
+
+    private void configureExecutionProvider(OrtSession.SessionOptions opts) {
+        String provider = config.getOnnxExecutionProvider();
+        if (provider == null || provider.isBlank()) {
+            provider = "auto";
+        }
+
+        String normalized = provider.toLowerCase(Locale.ROOT);
+        boolean isWindows = System.getProperty("os.name", "")
+                .toLowerCase(Locale.ROOT).contains("win");
+
+        if ("cpu".equals(normalized)) {
+            Logger.info("Using ONNX Runtime CPU execution provider");
+            return;
+        }
+
+        if (!"directml".equals(normalized) && !"auto".equals(normalized)) {
+            Logger.warn("Unknown ONNX execution provider '{}', falling back to auto", provider);
+            normalized = "auto";
+        }
+
+        if (!isWindows) {
+            if ("directml".equals(normalized)) {
+                Logger.warn("DirectML was requested but is only available on Windows; using CPU");
+            }
+            return;
+        }
+
+        try {
+            Method addDirectML = opts.getClass().getMethod("addDirectML", int.class);
+            addDirectML.invoke(opts, 0);
+            Logger.info("Enabled ONNX Runtime DirectML execution provider");
+        } catch (NoSuchMethodException e) {
+            if ("directml".equals(normalized)) {
+                Logger.warn("This ONNX Runtime build does not expose DirectML; using CPU");
+            }
+        } catch (Exception e) {
+            if ("directml".equals(normalized)) {
+                Logger.warn("Failed to enable DirectML execution provider: {}", e.getMessage());
+            } else {
+                Logger.info("DirectML unavailable, falling back to CPU: {}", e.getMessage());
+            }
+        }
     }
 
     public synchronized DecisionResult requestDecision(DecisionContext context) {

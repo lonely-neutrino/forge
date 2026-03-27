@@ -13,6 +13,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+from model.backend import resolve_backend
 
 sys.path.insert(0, os.path.dirname(
     os.path.dirname(os.path.abspath(__file__))))
@@ -2491,13 +2492,14 @@ def main():
     for p in candidates:
         if p and os.path.exists(p):
             print(f"Loading model: {p}", flush=True)
-            model = MTGModel.load(p, device=args.device)
+            backend = resolve_backend(args.device)
+            model = MTGModel.load(p, device=backend.name)
             model.eval()
             model_path = p
             break
 
     root = tk.Tk()
-    GameStateViewer(root, samples, model, args.device,
+    GameStateViewer(root, samples, model, backend.torch_device if model is not None else resolve_backend(args.device).torch_device,
                     model_path=model_path,
                     data_dir=args.data_dir)
     root.mainloop()

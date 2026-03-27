@@ -1,7 +1,9 @@
-# PyTorch with CUDA support for RTX 3080 (CUDA 11.8+)
---index-url https://download.pytorch.org/whl/cu121
+# Cross-platform PyTorch base package
 torch>=2.2.0
 torchvision>=0.17.0
+
+# Windows AMD / DirectML acceleration
+torch-directml>=0.2.5.dev240914; platform_system == "Windows"
 
 # Training and evaluation
 numpy>=1.24.0
@@ -10,4 +12,5 @@ tqdm>=4.66.0
 
 # ONNX export for deployment
 onnx>=1.15.0
-onnxruntime-gpu>=1.17.0
+onnxruntime>=1.17.0
+onnxruntime-directml>=1.17.0; platform_system == "Windows"

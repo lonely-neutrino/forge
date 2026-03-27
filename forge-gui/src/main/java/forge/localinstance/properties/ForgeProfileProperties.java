@@ -20,6 +20,7 @@ package forge.localinstance.properties;
 import java.io.File;
 import java.io.IOException;
 import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.Map;
 import java.util.Properties;
 
@@ -75,11 +76,20 @@ public class ForgeProfileProperties {
         decksDir    = getDir(props, DECKS_DIR_KEY, userDir + "decks" + File.separator);
         decksConstructedDir = getDir(props, DECKS_CONSTRUCTED_DIR_KEY, decksDir + "constructed" + File.separator);
 
+        if (!ensureWritableDirectory(userDir) || !ensureWritableDirectory(cacheDir) || !ensureWritableDirectory(cardPicsDir)) {
+            final Pair<String, String> fallbackDirs = getFallbackDirs();
+            userDir = getDir(new Properties(), USER_DIR_KEY, fallbackDirs.getLeft());
+            cacheDir = getDir(new Properties(), CACHE_DIR_KEY, fallbackDirs.getRight());
+            cardPicsDir = getDir(new Properties(), CARD_PICS_DIR_KEY, cacheDir + "pics" + File.separator + "cards" + File.separator);
+            decksDir = getDir(new Properties(), DECKS_DIR_KEY, userDir + "decks" + File.separator);
+            decksConstructedDir = getDir(new Properties(), DECKS_CONSTRUCTED_DIR_KEY, decksDir + "constructed" + File.separator);
 
-        //ensure directories exist
-        FileUtil.ensureDirectoryExists(userDir);
-        FileUtil.ensureDirectoryExists(cacheDir);
-        FileUtil.ensureDirectoryExists(cardPicsDir);
+            System.err.println("Forge profile directory is not writable. Falling back to: " + userDir);
+
+            ensureWritableDirectory(userDir);
+            ensureWritableDirectory(cacheDir);
+            ensureWritableDirectory(cardPicsDir);
+        }
     }
 
     public static String getUserDir() {
@@ -195,6 +205,27 @@ public class ForgeProfileProperties {
 
         // Linux and everything else
         return Pair.of(fallbackDataDir, TextUtil.concatNoSpace(homeDir, "/.cache/forge"));
+    }
+
+    private static Pair<String, String> getFallbackDirs() {
+        final String homeDir = System.getProperty("user.home");
+        if (StringUtils.isEmpty(homeDir)) {
+            throw new RuntimeException("cannot determine user home directory");
+        }
+        return Pair.of(TextUtil.concatNoSpace(homeDir, "/.forge"),
+                TextUtil.concatNoSpace(homeDir, "/.cache/forge"));
+    }
+
+    private static boolean ensureWritableDirectory(final String dirPath) {
+        try {
+            final Path dir = new File(dirPath).toPath();
+            Files.createDirectories(dir);
+            final Path probe = Files.createTempFile(dir, "forge", ".tmp");
+            Files.deleteIfExists(probe);
+            return true;
+        } catch (final IOException | SecurityException e) {
+            return false;
+        }
     }
 
     private static void save() {

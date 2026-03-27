@@ -45,6 +45,7 @@ except ImportError:
     HAS_MATPLOTLIB = False
 
 from model.mtg_model import MTGModel
+from model.backend import resolve_backend
 from model.gpu_config import auto_detect_profile
 
 
@@ -243,12 +244,12 @@ def trainer_thread(state: TrainingState, args):
     """Runs training in background thread, updating state."""
     try:
         profile = auto_detect_profile()
-        device = args.device or (
-            'cuda' if torch.cuda.is_available() else 'cpu')
+        backend = resolve_backend(args.device)
+        device = backend.torch_device
         batch_size = args.batch_size or profile.batch_size
-        use_amp = profile.use_amp and device.startswith('cuda')
+        use_amp = profile.use_amp and backend.use_amp
 
-        state.device = device
+        state.device = backend.name
         state.gpu_name = profile.name
         state.batch_size = batch_size
         state.total_epochs = args.epochs
@@ -293,13 +294,13 @@ def trainer_thread(state: TrainingState, args):
             train_dataset,
             batch_size=batch_size, shuffle=True,
             num_workers=0,
-            pin_memory=device.startswith('cuda'),
+            pin_memory=backend.pin_memory,
             drop_last=True)
         val_loader = torch.utils.data.DataLoader(
             val_dataset,
             batch_size=batch_size, shuffle=False,
             num_workers=0,
-            pin_memory=device.startswith('cuda'))
+            pin_memory=backend.pin_memory)
 
         # Model
         model = MTGModel().to(device)
@@ -454,7 +455,7 @@ def trainer_thread(state: TrainingState, args):
             state.eta = remaining * state.epoch_time
 
             # Sync GPU and update state
-            if device.startswith('cuda'):
+            if backend.is_cuda:
                 torch.cuda.synchronize()
                 state.gpu_mem_used_mb = (
                     torch.cuda.memory_allocated() / 1024**2)

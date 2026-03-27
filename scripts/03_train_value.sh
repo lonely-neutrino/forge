@@ -1,6 +1,6 @@
 #!/bin/bash
 # Step 3: Train value network (game state encoder)
-# Usage: 03_train_value.sh [epochs] [batch_size]
+# Usage: 03_train_value.sh [epochs] [batch_size] [device]
 set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -41,6 +41,7 @@ cd "$PYTHON_DIR"
 
 EPOCHS=${1:-100}
 BATCH=${2:-256}
+DEVICE_ARG=${3:-}
 DATA_DIR="$PROJECT_ROOT/rl_data/trajectories"
 SAVE_DIR="$PROJECT_ROOT/rl_data/checkpoints"
 if [[ "$PYTHON" == *.exe ]] && command -v cygpath >/dev/null 2>&1; then
@@ -50,7 +51,11 @@ else
     DATA_DIR_PY="$DATA_DIR"
     SAVE_DIR_PY="$SAVE_DIR"
 fi
-DEVICE=$("$PYTHON" -c "import torch; print('cuda' if torch.cuda.is_available() else 'cpu')" 2>/dev/null || echo cpu)
+if [ -n "$DEVICE_ARG" ]; then
+    DEVICE="$DEVICE_ARG"
+else
+    DEVICE=$("$PYTHON" -c "import sys; sys.path.insert(0, r'$PYTHON_DIR'); from model.backend import auto_device_name; print(auto_device_name())" 2>/dev/null || echo cpu)
+fi
 
 echo "Training value network for $EPOCHS epochs, batch=$BATCH (chunked loading)..."
 echo "Device: $DEVICE"

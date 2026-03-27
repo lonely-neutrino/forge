@@ -672,7 +672,7 @@
   <div class="step-num">2</div>
   <div>
     <strong style="color:var(--text)">Value Network Training</strong> — Predict win/loss from any mid-game state. 100 epochs, 99.6% accuracy<br>
-    <code>python training/training_ui.py --epochs 100 --device cuda</code>
+    <code>python training/training_ui.py --epochs 100 --device dml</code>
   </div>
 </div>
 
@@ -680,7 +680,7 @@
   <div class="step-num">3</div>
   <div>
     <strong style="color:var(--text)">Decision Head Training</strong> — Freeze encoder, train attack (13,918 decisions) + block (6,546 decisions) heads<br>
-    <code>python training/train_decisions_ui.py --epochs 50 --device cuda</code>
+    <code>python training/train_decisions_ui.py --epochs 50 --device dml</code>
   </div>
 </div>
 
@@ -688,7 +688,7 @@
   <div class="step-num">4</div>
   <div>
     <strong style="color:var(--text)">Model Server + Evaluation</strong> — Serve trained model, run RL agent vs heuristic AI, measure win rate<br>
-    <code>python serving/model_server.py --device cuda</code>
+    <code>python serving/model_server.py --device dml</code>
   </div>
 </div>
 

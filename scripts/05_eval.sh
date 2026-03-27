@@ -1,6 +1,6 @@
 #!/bin/bash
 # Step 5: Evaluate RL model vs heuristic AI
-# Usage: 05_eval.sh [checkpoint] [games]
+# Usage: 05_eval.sh [checkpoint] [games] [device]
 # Uses the same server+Java approach as PPO training
 set -e
 cd /home/maustin/forge/forge-ai-rl/src/main/python
@@ -19,6 +19,7 @@ else
     CKPT="$1"
 fi
 GAMES=${2:-100}
+DEVICE=${3:-dml}
 
 echo "Evaluating RL model vs heuristic..."
 echo "  Checkpoint: $CKPT"
@@ -37,9 +38,9 @@ n_games = $GAMES
 eval_dir = '/tmp/rl_eval'
 
 # Load model and start server
-model = MTGModel.load(checkpoint, device='cuda')
+model = MTGModel.load(checkpoint, device='$DEVICE')
 model.eval()
-server = ModelServer(model, host='0.0.0.0', port=0, device='cuda')
+server = ModelServer(model, host='0.0.0.0', port=0, device='$DEVICE')
 
 # Find the actual port
 import socket

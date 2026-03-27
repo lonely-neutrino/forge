@@ -11,6 +11,24 @@ import torch.nn as nn
 import math
 
 
+def _make_transformer_encoder(encoder_layer: nn.TransformerEncoderLayer,
+                              num_layers: int) -> nn.TransformerEncoder:
+    """Disable nested tensor fast-path so DirectML can run TransformerEncoder."""
+    try:
+        return nn.TransformerEncoder(
+            encoder_layer,
+            num_layers=num_layers,
+            enable_nested_tensor=False,
+        )
+    except TypeError:
+        encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        if hasattr(encoder, "enable_nested_tensor"):
+            encoder.enable_nested_tensor = False
+        if hasattr(encoder, "use_nested_tensor"):
+            encoder.use_nested_tensor = False
+        return encoder
+
+
 class CardSetEncoder(nn.Module):
     """
     Encodes a set of card feature vectors using multi-head self-attention.
@@ -31,7 +49,7 @@ class CardSetEncoder(nn.Module):
             batch_first=True,
             activation='gelu'
         )
-        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        self.transformer = _make_transformer_encoder(encoder_layer, num_layers)
         self.output_norm = nn.LayerNorm(embed_dim)
 
     def forward(self, card_features: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
@@ -113,7 +131,7 @@ class GameStateTransformer(nn.Module):
             batch_first=True,
             activation='gelu'
         )
-        self.cross_zone_transformer = nn.TransformerEncoder(cross_layer, num_layers=1)
+        self.cross_zone_transformer = _make_transformer_encoder(cross_layer, 1)
 
         # Final projection to output_dim
         # 7 zone embeddings: global, my_board, opp_board, hand, my_gy, opp_gy, stack

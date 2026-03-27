@@ -14,10 +14,7 @@ if [ ! -f "$PYTHON" ]; then
     exit 1
 fi
 
-DEVICE="cpu"
-if "$PYTHON" -c "import torch; exit(0 if torch.cuda.is_available() else 1)" 2>/dev/null; then
-    DEVICE="cuda"
-fi
+DEVICE=$("$PYTHON" -c "import sys; sys.path.insert(0, r'$PYTHON_DIR'); from model.backend import auto_device_name; print(auto_device_name())" 2>/dev/null || echo cpu)
 
 echo "=== Starting Model Server ==="
 echo "Model: $MODEL"

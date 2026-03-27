@@ -38,6 +38,7 @@ sys.path.insert(0, os.path.dirname(
     os.path.dirname(os.path.abspath(__file__))))
 
 from model.mtg_model import MTGModel
+from model.backend import resolve_backend
 from model.gpu_config import auto_detect_profile
 from training.ppo_trainer import (
     load_ppo_data, run_games, start_model_server,
@@ -264,24 +265,24 @@ def log(state, msg):
 def awr_thread(state, args):
     try:
         profile = auto_detect_profile()
-        device = args.device or (
-            'cuda' if torch.cuda.is_available() else 'cpu')
-        use_amp = profile.use_amp and device.startswith('cuda')
+        backend = resolve_backend(args.device)
+        device = backend.torch_device
+        use_amp = profile.use_amp and backend.use_amp
         port = args.port or find_free_port()
 
-        state.device = device
+        state.device = backend.name
         state.gpu_name = profile.name
         state.total_rounds = args.rounds
 
         log(state, f"=== AWR Offline RL Training ===")
-        log(state, f"Device: {device} ({profile.name})")
+        log(state, f"Device: {backend.name} ({profile.name})")
         log(state, f"Port: {port}")
         log(state, f"Temperature: {args.temperature}")
         log(state, f"Using ARGMAX for data collection")
 
         # Load model
         log(state, f"Loading: {args.checkpoint}")
-        model = MTGModel.load(args.checkpoint, device=device)
+        model = MTGModel.load(args.checkpoint, device=backend.name)
         log(state, "Model loaded.")
 
         # Freeze encoder
@@ -607,7 +608,7 @@ def main():
     parser.add_argument('--save-dir',
                         default=os.path.join(PROJECT_ROOT,
                                               'rl_data/checkpoints'))
-    parser.add_argument('--device', default='cuda')
+    parser.add_argument('--device', default=None)
     parser.add_argument('--rounds', type=int, default=50)
     parser.add_argument('--games-per-round', type=int,
                         default=100)

@@ -7,6 +7,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from .game_state_encoder import _make_transformer_encoder
+
 
 class MulliganHead(nn.Module):
     """
@@ -31,7 +33,7 @@ class MulliganHead(nn.Module):
             batch_first=True,
             activation='gelu'
         )
-        self.hand_encoder = nn.TransformerEncoder(encoder_layer, num_layers=2)
+        self.hand_encoder = _make_transformer_encoder(encoder_layer, 2)
 
         # Keep/mulligan decision
         self.keep_classifier = nn.Sequential(

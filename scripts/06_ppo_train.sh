@@ -1,6 +1,6 @@
 #!/bin/bash
 # Step 6: PPO training with dashboard
-# Usage: 06_ppo_train.sh [model] [rounds] [games] [--deck "Deck Name.dck"...]
+# Usage: 06_ppo_train.sh [model] [rounds] [games] [device] [--deck "Deck Name.dck"...]
 #
 # Auto-resumes from best_ppo_model.pt if it exists (unless a model is specified).
 # Kill anytime (Ctrl+C) — progress is saved after each round.
@@ -50,7 +50,6 @@ SAVE_DIR="$PROJECT_ROOT/rl_data/checkpoints"
 LATEST_PPO="$SAVE_DIR/ppo_model_latest.pt"
 BEST_PPO="$SAVE_DIR/best_ppo_model.pt"
 IMITATION="$SAVE_DIR/model_with_decisions.pt"
-DEVICE=$("$PYTHON" -c "import torch; print('cuda' if torch.cuda.is_available() else 'cpu')" 2>/dev/null || echo cpu)
 if [[ "$PYTHON" == *.exe ]] && command -v cygpath >/dev/null 2>&1; then
     SAVE_DIR_PY="$(cygpath -m "$SAVE_DIR")"
 else
@@ -97,6 +96,12 @@ fi
 
 ROUNDS=${POSITIONAL_ARGS[1]:-50}
 GAMES=${POSITIONAL_ARGS[2]:-400}
+DEVICE_ARG=${POSITIONAL_ARGS[3]:-}
+if [ -n "$DEVICE_ARG" ]; then
+    DEVICE="$DEVICE_ARG"
+else
+    DEVICE=$("$PYTHON" -c "import sys; sys.path.insert(0, r'$PYTHON_DIR'); from model.backend import auto_device_name; print(auto_device_name())" 2>/dev/null || echo cpu)
+fi
 
 echo "PPO Training: $ROUNDS rounds, $GAMES games/round"
 echo "Model: $MODEL"

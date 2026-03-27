@@ -7,6 +7,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from .game_state_encoder import _make_transformer_encoder
+
 
 class CardSelectHead(nn.Module):
     """
@@ -31,7 +33,7 @@ class CardSelectHead(nn.Module):
             batch_first=True,
             activation='gelu'
         )
-        self.candidate_attention = nn.TransformerEncoder(encoder_layer, num_layers=1)
+        self.candidate_attention = _make_transformer_encoder(encoder_layer, 1)
 
         # Score each card for selection
         self.score_network = nn.Sequential(

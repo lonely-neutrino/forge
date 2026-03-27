@@ -116,6 +116,7 @@ def ppo_thread(state, args):
             parse_game_state, CARD_DIM, GLOBAL_DIM,
             ZONES_CONFIG)
         from model.mtg_model import MTGModel
+        from model.backend import resolve_backend
         from model.gpu_config import auto_detect_profile
         import torch
         import torch.optim as optim
@@ -123,18 +124,17 @@ def ppo_thread(state, args):
         import random
 
         profile = auto_detect_profile()
-        device = args.device or (
-            'cuda' if torch.cuda.is_available() else 'cpu')
-        use_amp = (profile.use_amp
-                   and device.startswith('cuda'))
+        backend = resolve_backend(args.device)
+        device = backend.torch_device
+        use_amp = profile.use_amp and backend.use_amp
         port = args.port or find_free_port()
 
-        state.device = device
+        state.device = backend.name
         state.gpu_name = profile.name
         state.total_rounds = args.rounds
         decks = load_rl_decks(overrides=args.deck)
 
-        log(state, f"Device: {device} ({profile.name})")
+        log(state, f"Device: {backend.name} ({profile.name})")
         log(state, f"Port: {port}")
         log(state, f"Rounds: {args.rounds}, "
             f"Games/round: {args.games_per_round}")
@@ -144,7 +144,7 @@ def ppo_thread(state, args):
         log(state, f"Loading: {args.checkpoint}")
         if os.path.exists(args.checkpoint):
             model = MTGModel.load(
-                args.checkpoint, device=device)
+                args.checkpoint, device=backend.name)
         else:
             model = MTGModel().to(device)
         log(state, "Model loaded.")
@@ -577,7 +577,7 @@ def ppo_thread(state, args):
             del attack_data, block_data, priority_data
             del target_data, mulligan_data, value_data
             import gc; gc.collect()
-            if device.startswith('cuda'):
+            if backend.is_cuda:
                 torch.cuda.empty_cache()
 
             # Evaluate vs heuristic

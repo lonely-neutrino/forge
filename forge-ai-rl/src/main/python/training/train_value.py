@@ -37,6 +37,7 @@ sys.path.insert(0, os.path.dirname(
     os.path.dirname(os.path.abspath(__file__))))
 
 from model.mtg_model import MTGModel
+from model.backend import resolve_backend
 from model.gpu_config import auto_detect_profile, estimate_memory_usage
 
 logging.basicConfig(
@@ -395,10 +396,10 @@ def main():
 
     # Setup
     profile = auto_detect_profile()
-    device = args.device or (
-        'cuda' if torch.cuda.is_available() else 'cpu')
+    backend = resolve_backend(args.device)
+    device = backend.torch_device
     batch_size = args.batch_size or profile.batch_size
-    use_amp = profile.use_amp and device.startswith('cuda')
+    use_amp = profile.use_amp and backend.use_amp
 
     os.makedirs(args.save_dir, exist_ok=True)
     os.makedirs(args.log_dir, exist_ok=True)
@@ -407,7 +408,7 @@ def main():
     print_header('MTG RL — Value Network Training')
 
     print_config([
-        ('Device', f'{device} ({profile.name})'),
+        ('Device', f'{backend.name} ({profile.name})'),
         ('Batch size', str(batch_size)),
         ('Learning rate', f'{args.lr:.0e}'),
         ('Epochs', str(args.epochs)),
@@ -434,12 +435,12 @@ def main():
     train_loader = torch.utils.data.DataLoader(
         train_ds, batch_size=batch_size, shuffle=True,
         num_workers=0,
-        pin_memory=device.startswith('cuda'),
+        pin_memory=backend.pin_memory,
         drop_last=True)
     val_loader = torch.utils.data.DataLoader(
         val_ds, batch_size=batch_size, shuffle=False,
         num_workers=0,
-        pin_memory=device.startswith('cuda'))
+        pin_memory=backend.pin_memory)
 
     print(f'  Split: {n_train} train / {n_val} val',
           flush=True)
@@ -451,7 +452,7 @@ def main():
           flush=True)
 
     mem = estimate_memory_usage(batch_size)
-    if device.startswith('cuda'):
+    if backend.is_gpu:
         print(f'  Est. VRAM: {mem["total_gb"]:.2f} GB',
               flush=True)
 

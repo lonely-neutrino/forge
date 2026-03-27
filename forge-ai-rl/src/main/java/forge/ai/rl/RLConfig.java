@@ -23,6 +23,7 @@ public class RLConfig {
     private boolean recordTrajectories = false;
     private String trajectoryOutputDir = "rl_data/trajectories";
     private String onnxModelDir = "rl_data/models";
+    private String onnxExecutionProvider = "auto";
 
     // Reward shaping
     private double winReward = 1.0;
@@ -65,6 +66,8 @@ public class RLConfig {
     public void setTrajectoryOutputDir(String dir) { this.trajectoryOutputDir = dir; }
     public String getOnnxModelDir() { return onnxModelDir; }
     public void setOnnxModelDir(String dir) { this.onnxModelDir = dir; }
+    public String getOnnxExecutionProvider() { return onnxExecutionProvider; }
+    public void setOnnxExecutionProvider(String provider) { this.onnxExecutionProvider = provider; }
 
     public double getWinReward() { return winReward; }
     public double getLoseReward() { return loseReward; }

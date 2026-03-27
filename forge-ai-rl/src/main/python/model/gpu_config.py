@@ -16,6 +16,8 @@ Memory estimates at default dimensions:
 
 from dataclasses import dataclass
 
+from .backend import resolve_backend
+
 
 @dataclass
 class GPUProfile:
@@ -85,10 +87,25 @@ CPU_ONLY = GPUProfile(
     num_workers=2,
 )
 
+DIRECTML_GPU = GPUProfile(
+    name="Windows DirectML GPU",
+    vram_gb=16.0,
+    batch_size=64,
+    accumulation_steps=1,
+    use_amp=False,
+    use_gradient_checkpointing=False,
+    max_game_state_dim=512,
+    max_board_size=30,
+    max_hand_size=15,
+    num_workers=2,
+)
+
 PROFILES = {
     'rtx3080': RTX_3080,
     'rtx3090': RTX_3090,
     'rtx4090': RTX_4090,
+    'directml': DIRECTML_GPU,
+    'dml': DIRECTML_GPU,
     'cpu': CPU_ONLY,
 }
 
@@ -101,9 +118,13 @@ def get_profile(name: str = 'rtx3080') -> GPUProfile:
 def auto_detect_profile() -> GPUProfile:
     """Auto-detect GPU and return appropriate profile."""
     try:
-        import torch
-        if not torch.cuda.is_available():
+        backend = resolve_backend()
+        if backend.is_dml:
+            return DIRECTML_GPU
+        if not backend.is_cuda:
             return CPU_ONLY
+
+        import torch
 
         gpu_name = torch.cuda.get_device_name(0).lower()
         vram_bytes = torch.cuda.get_device_properties(0).total_memory
@@ -123,6 +144,8 @@ def auto_detect_profile() -> GPUProfile:
             return profile
 
     except ImportError:
+        return CPU_ONLY
+    except RuntimeError:
         return CPU_ONLY
 
 

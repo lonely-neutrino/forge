@@ -1,6 +1,6 @@
 #!/bin/bash
 # Step 9: Self-play PPO training with Elo tracking
-# Usage: 09_selfplay_train.sh [model] [rounds] [games]
+# Usage: 09_selfplay_train.sh [model] [rounds] [games] [device]
 #
 # Both players are the RL model — guarantees 50% win rate for balanced signal.
 # Periodically evaluates vs heuristic to measure absolute strength.
@@ -33,6 +33,7 @@ fi
 
 ROUNDS=${2:-100}
 GAMES=${3:-400}
+DEVICE=${4:-dml}
 
 echo "Self-Play PPO: $ROUNDS rounds, $GAMES games/round"
 echo "Model: $MODEL"
@@ -42,7 +43,7 @@ echo ""
 python training/ppo_ui.py \
     --checkpoint "$MODEL" \
     --save-dir "$SAVE_DIR" \
-    --device cuda \
+    --device "$DEVICE" \
     --rounds "$ROUNDS" \
     --games-per-round "$GAMES" \
     --eval-games 100 \

@@ -38,6 +38,7 @@ sys.path.insert(0, os.path.dirname(
     os.path.dirname(os.path.abspath(__file__))))
 
 from model.mtg_model import MTGModel
+from model.backend import resolve_backend
 from model.gpu_config import auto_detect_profile
 from training.mmap_dataset import parse_game_state, GAME_STATE_DIM, CARD_DIM, GLOBAL_DIM, ZONES_CONFIG
 from pathlib import Path
@@ -710,9 +711,9 @@ def main():
     args = parser.parse_args()
 
     profile = auto_detect_profile()
-    device = args.device or (
-        'cuda' if torch.cuda.is_available() else 'cpu')
-    use_amp = profile.use_amp and device.startswith('cuda')
+    backend = resolve_backend(args.device)
+    device = backend.torch_device
+    use_amp = profile.use_amp and backend.use_amp
 
     os.makedirs(args.save_dir, exist_ok=True)
 
@@ -722,7 +723,7 @@ def main():
           flush=True)
     print('└────────────────────────────────────────────┘',
           flush=True)
-    print(f'  Device: {device} ({profile.name})',
+    print(f'  Device: {backend.name} ({profile.name})',
           flush=True)
     print(f'  AMP: {use_amp}', flush=True)
     print(f'  Encoder: {args.encoder_checkpoint}',
@@ -733,7 +734,7 @@ def main():
         print(f'  Loading pre-trained encoder...',
               flush=True)
         model = MTGModel.load(
-            args.encoder_checkpoint, device=device)
+            args.encoder_checkpoint, device=backend.name)
         print(f'  Loaded.', flush=True)
     else:
         print(f'  No checkpoint found, using random init',

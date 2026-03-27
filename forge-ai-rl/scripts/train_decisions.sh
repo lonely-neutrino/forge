@@ -19,11 +19,13 @@ if [ ! -f "$ENCODER" ]; then
     exit 1
 fi
 
+DEVICE=$("$PYTHON" -c "import sys; sys.path.insert(0, r'$PYTHON_DIR'); from model.backend import auto_device_name; print(auto_device_name())" 2>/dev/null || echo cpu)
+
 cd "$PYTHON_DIR"
 PYTHONUNBUFFERED=1 "$PYTHON" -u training/train_decisions.py \
     --data-dir "$DATA_DIR" \
     --save-dir "$SAVE_DIR" \
     --encoder-checkpoint "$ENCODER" \
     --epochs "$EPOCHS" \
-    --device cuda \
+    --device "$DEVICE" \
     --heads attack,block

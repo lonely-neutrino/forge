@@ -23,6 +23,7 @@ import torch
 
 # Add parent directory to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from model.backend import resolve_backend
 from model.mtg_model import MTGModel
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
@@ -581,24 +582,25 @@ def main():
     parser.add_argument('--host', default='localhost', help='Server host')
     parser.add_argument('--port', type=int, default=50051, help='Server port')
     parser.add_argument('--model', default=None, help='Path to saved model weights')
-    parser.add_argument('--device', default='cpu', help='Device (cpu/cuda)')
+    parser.add_argument('--device', default='cpu', help='Device (cpu/cuda/dml)')
     args = parser.parse_args()
+    backend = resolve_backend(args.device)
 
     # Create or load model
     if args.model and os.path.exists(args.model):
         logger.info(f"Loading model from {args.model}")
-        model = MTGModel.load(args.model, device=args.device)
+        model = MTGModel.load(args.model, device=backend.name)
     else:
         logger.info("Creating fresh model with random weights")
         model = MTGModel()
-        model.to(args.device)
+        model.to(backend.torch_device)
 
     # Print parameter counts
     counts = model.count_parameters()
     logger.info(f"Model parameters: {counts}")
 
     # Start server
-    server = ModelServer(model, host=args.host, port=args.port, device=args.device)
+    server = ModelServer(model, host=args.host, port=args.port, device=backend.torch_device)
     server.start()
 
 

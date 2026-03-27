@@ -42,6 +42,7 @@ sys.path.insert(0, os.path.dirname(
     os.path.dirname(os.path.abspath(__file__))))
 
 from model.mtg_model import MTGModel
+from model.backend import resolve_backend
 from model.gpu_config import auto_detect_profile
 from serving.model_server import ModelServer
 from training.mmap_dataset import parse_game_state, GAME_STATE_DIM, CARD_DIM, GLOBAL_DIM, ZONES_CONFIG
@@ -1296,9 +1297,9 @@ def main():
     args = parser.parse_args()
 
     profile = auto_detect_profile()
-    device = args.device or (
-        'cuda' if torch.cuda.is_available() else 'cpu')
-    use_amp = profile.use_amp and device.startswith('cuda')
+    backend = resolve_backend(args.device)
+    device = backend.torch_device
+    use_amp = profile.use_amp and backend.use_amp
     port = args.port or find_free_port()
     decks = load_rl_decks(overrides=args.deck)
 
@@ -1311,7 +1312,7 @@ def main():
           flush=True)
     print('└────────────────────────────────────────┘',
           flush=True)
-    print(f'  Device: {device} ({profile.name})',
+    print(f'  Device: {backend.name} ({profile.name})',
           flush=True)
     print(f'  Rounds: {args.rounds}', flush=True)
     print(f'  Games/round: {args.games_per_round}',
@@ -1326,7 +1327,7 @@ def main():
           flush=True)
     if os.path.exists(args.checkpoint):
         model = MTGModel.load(
-            args.checkpoint, device=device)
+            args.checkpoint, device=backend.name)
     else:
         print('  No checkpoint, using random init',
               flush=True)

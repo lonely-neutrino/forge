@@ -12,6 +12,8 @@ from pathlib import Path
 from typing import List, Optional
 import logging
 
+from model.backend import resolve_backend
+
 logger = logging.getLogger(__name__)
 
 
@@ -201,6 +203,6 @@ def create_dataloader(data_dir: str, batch_size: int = 64,
         batch_size=batch_size,
         shuffle=shuffle,
         num_workers=num_workers,
-        pin_memory=torch.cuda.is_available(),
+        pin_memory=resolve_backend().pin_memory,
         drop_last=True,
     )

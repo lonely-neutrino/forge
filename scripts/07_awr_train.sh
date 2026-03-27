@@ -1,7 +1,7 @@
 #!/bin/bash
 # Step 7: AWR (Advantage-Weighted Regression) offline RL training
 # Alternative to PPO — collects data under argmax (full strength play)
-# Usage: 07_awr_train.sh [model] [rounds] [games]
+# Usage: 07_awr_train.sh [model] [rounds] [games] [device]
 set -e
 cd /home/maustin/forge/forge-ai-rl/src/main/python
 source /home/maustin/forge/forge-ai-rl/venv/bin/activate
@@ -24,6 +24,7 @@ fi
 
 ROUNDS=${2:-50}
 GAMES=${3:-100}
+DEVICE=${4:-dml}
 
 echo "AWR Training: $ROUNDS rounds, $GAMES games/round (ARGMAX collection)"
 echo "Model: $MODEL"
@@ -32,7 +33,7 @@ echo ""
 python training/awr_trainer.py \
     --checkpoint "$MODEL" \
     --save-dir "$SAVE_DIR" \
-    --device cuda \
+    --device "$DEVICE" \
     --rounds "$ROUNDS" \
     --games-per-round "$GAMES" \
     --eval-games 50 \

@@ -1,7 +1,7 @@
 #!/bin/bash
 # Step 5: Verify model works in live games
 # Checks: server alive, RL decisions real, creatures played, attack probs vary
-# Usage: ./05_verify_model.sh [model] [games] [--deck "Deck Name.dck"...]
+# Usage: ./05_verify_model.sh [model] [games] [device] [--deck "Deck Name.dck"...]
 set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -61,6 +61,7 @@ done
 
 MODEL=${POSITIONAL_ARGS[0]:-rl_data/checkpoints/model_with_decisions.pt}
 GAMES=${POSITIONAL_ARGS[1]:-10}
+DEVICE_ARG=${POSITIONAL_ARGS[2]:-}
 PORT=50051
 MODEL_PATH="$PROJECT_ROOT/$MODEL"
 VERIFY_DIR="${TMPDIR:-/tmp}/rl_verify"
@@ -70,7 +71,11 @@ if [[ "$PYTHON" == *.exe ]] && command -v cygpath >/dev/null 2>&1; then
 else
     MODEL_PATH_PY="$MODEL_PATH"
 fi
-DEVICE=$("$PYTHON" -c "import torch; print('cuda' if torch.cuda.is_available() else 'cpu')" 2>/dev/null || echo cpu)
+if [ -n "$DEVICE_ARG" ]; then
+    DEVICE="$DEVICE_ARG"
+else
+    DEVICE=$("$PYTHON" -c "import sys; sys.path.insert(0, r'$PYTHON_DIR'); from model.backend import auto_device_name; print(auto_device_name())" 2>/dev/null || echo cpu)
+fi
 
 DECK_OUTPUT="$(
     cd "$PYTHON_DIR" &&

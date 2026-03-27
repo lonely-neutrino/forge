@@ -5,6 +5,7 @@ This is the single model object used for training and inference.
 
 import torch
 import torch.nn as nn
+from .backend import resolve_backend
 from .game_state_encoder import GameStateTransformer
 from .value_network import ValueNetwork
 from .priority_head import PriorityHead
@@ -96,7 +97,9 @@ class MTGModel(nn.Module):
     @classmethod
     def load(cls, path: str, device: str = 'cpu') -> 'MTGModel':
         """Load model from saved weights."""
-        checkpoint = torch.load(path, map_location=device)
+        runtime = resolve_backend(device) if isinstance(device, str) else None
+        target_device = runtime.torch_device if runtime is not None else device
+        checkpoint = torch.load(path, map_location='cpu')
         model = cls(**checkpoint['config'])
         # Filter out keys with size mismatches (e.g. target_head
         # expanded from 64 to 256-dim)
@@ -112,7 +115,7 @@ class MTGModel(nn.Module):
             print(f"Skipped weights (shape mismatch): "
                   f"{skipped[:5]}", flush=True)
         model.load_state_dict(filtered, strict=False)
-        model.to(device)
+        model.to(target_device)
         return model
 
     def count_parameters(self) -> dict:

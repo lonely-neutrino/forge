@@ -24,10 +24,12 @@ if [ -n "$MAX_FILES" ]; then
     EXTRA_ARGS="--max-files $MAX_FILES"
 fi
 
+DEVICE=$("$PYTHON" -c "import sys; sys.path.insert(0, r'$PYTHON_DIR'); from model.backend import auto_device_name; print(auto_device_name())" 2>/dev/null || echo cpu)
+
 cd "$PYTHON_DIR"
 "$PYTHON" training/training_ui.py \
     --data-dir "$DATA_DIR" \
     --save-dir "$SAVE_DIR" \
     --epochs "$EPOCHS" \
-    --device cuda \
+    --device "$DEVICE" \
     $EXTRA_ARGS

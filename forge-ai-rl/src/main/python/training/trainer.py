@@ -21,6 +21,7 @@ from torch.utils.tensorboard import SummaryWriter
 import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from model.mtg_model import MTGModel
+from model.backend import is_cuda_device, resolve_backend
 from training.replay_buffer import ReplayBuffer, GameTrajectory
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
@@ -52,7 +53,7 @@ class PPOTrainer:
         self.global_step = 0
 
         # Mixed precision for GPU memory efficiency (RTX 3080 10GB)
-        self.use_amp = device.startswith('cuda')
+        self.use_amp = is_cuda_device(device)
         self.scaler = torch.amp.GradScaler('cuda') if self.use_amp else None
 
     def train_imitation(self, replay_buffer: ReplayBuffer, batch_size: int = 64,
@@ -298,11 +299,12 @@ def main():
         from model.gpu_config import get_profile
         profile = get_profile(args.gpu_profile)
 
-    device = args.device or ('cuda' if torch.cuda.is_available() else 'cpu')
+    backend = resolve_backend(args.device)
+    device = backend.torch_device
     batch_size = args.batch_size or profile.batch_size
 
     logger.info(f"GPU Profile: {profile.name}")
-    logger.info(f"Device: {device}, Batch size: {batch_size}, AMP: {profile.use_amp}")
+    logger.info(f"Device: {backend.name}, Batch size: {batch_size}, AMP: {backend.use_amp and profile.use_amp}")
     mem = estimate_memory_usage(batch_size)
     logger.info(f"Estimated VRAM: {mem['total_gb']:.2f} GB")
 
