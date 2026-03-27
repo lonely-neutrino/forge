@@ -1,7 +1,8 @@
 #!/bin/bash
 # Step 4: Train attack/block/priority decision heads (imitation learning)
-# Usage: 04_train_decisions.sh [epochs] [batch_size] [encoder] [heads] [device]
+# Usage: 04_train_decisions.sh [epochs] [batch_size] [encoder] [heads] [device] [--joint]
 # heads: "all" (default), or comma-separated: "priority", "attack,block", etc.
+# --joint: train all heads simultaneously with unfrozen encoder
 set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -58,6 +59,12 @@ else
     DATA_DIR_PY="$DATA_DIR"
     CKPT_DIR_PY="$CKPT_DIR"
 fi
+JOINT_FLAG=""
+if [[ "$*" == *"--joint"* ]]; then
+    JOINT_FLAG="--joint"
+    echo "JOINT MODE: training all heads with unfrozen encoder"
+fi
+
 
 # Auto-select best available checkpoint if not explicitly provided
 if [ -z "$3" ]; then
@@ -106,4 +113,5 @@ echo "Device: $DEVICE"
     --device "$DEVICE" \
     --epochs "$EPOCHS" \
     --batch-size "$BATCH" \
-    --heads "$HEADS"
+    --heads "$HEADS" \
+    $JOINT_FLAG

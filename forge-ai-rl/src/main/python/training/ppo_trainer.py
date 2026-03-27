@@ -62,8 +62,8 @@ FORGE_JAR = os.path.join(
 
 # ── Data loading for PPO ─────────────────────────────
 
-GAE_GAMMA = 0.95  # must match value network training gamma
-GAE_LAMBDA = 0.90  # lower = trust per-step value deltas more, less terminal outcome influence
+GAE_GAMMA = 0.99  # must match value network training gamma
+GAE_LAMBDA = 0.95  # lower = trust per-step value deltas more, less terminal outcome influence
 
 
 def _compute_gae_returns(records, won):
@@ -455,7 +455,7 @@ def compute_ppo_batch(model, head, samples, device,
         total_loss = (
             policy_loss +
             0.5 * value_loss -
-            0.005 * entropy)
+            0.03 * entropy)
 
     metrics = {
         'policy_loss': policy_loss.item(),
@@ -762,7 +762,7 @@ def compute_ppo_priority_batch(model, head, samples,
         total_loss = (
             policy_loss +
             0.5 * value_loss -
-            0.005 * entropy)
+            0.03 * entropy)
 
     metrics = {
         'policy_loss': policy_loss.item(),

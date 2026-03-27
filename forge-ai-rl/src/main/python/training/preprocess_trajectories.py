@@ -127,7 +127,7 @@ def scan_files(files, progress_cb=None):
     return counts, max_cand
 
 
-GAMMA = 0.95  # discount factor for value returns
+GAMMA = 0.99  # discount factor for value returns
 
 
 def _extract_game_id(filepath):

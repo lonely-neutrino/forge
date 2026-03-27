@@ -17,6 +17,7 @@ import threading
 import time
 import random
 from dataclasses import dataclass, field
+from contextlib import nullcontext
 from typing import List
 from pathlib import Path
 
@@ -402,7 +403,8 @@ def _get_features(s):
             return s[key]
     return None
 
-def make_batch(model, batch, device, use_amp, head):
+def make_batch(model, batch, device, use_amp, head,
+               encoder_grad=False):
     max_c = max(_get_n_items(s) for s in batch)
     max_c = max(max_c, 1)
     bs = len(batch)
@@ -465,7 +467,9 @@ def make_batch(model, batch, device, use_amp, head):
         stm[i] = torch.from_numpy(masks['stack_mask'])
 
     with torch.amp.autocast('cuda', enabled=use_amp):
-        with torch.no_grad():
+        ctx = torch.no_grad() if not encoder_grad \
+            else nullcontext()
+        with ctx:
             state_emb = model.encode_state(
                 gf, mb, mbm, ob, obm, h, hm,
                 mg, mgm, og, ogm, st, stm)
@@ -494,7 +498,7 @@ def make_batch(model, batch, device, use_amp, head):
 
 
 def make_priority_batch(model, batch, device, use_amp,
-                        head):
+                        head, encoder_grad=False):
     """Build a priority batch with CrossEntropyLoss
     (single-select softmax)."""
     max_a = max(s['n_actions'] for s in batch)
@@ -569,7 +573,9 @@ def make_priority_batch(model, batch, device, use_amp,
         sample_weights = torch.ones(bs, device=device)
 
     with torch.amp.autocast('cuda', enabled=use_amp):
-        with torch.no_grad():
+        ctx = torch.no_grad() if not encoder_grad \
+            else nullcontext()
+        with ctx:
             state_emb = model.encode_state(
                 gf, mb, mbm, ob, obm, h, hm,
                 mg, mgm, og, ogm, st, stm)
@@ -589,7 +595,7 @@ def make_priority_batch(model, batch, device, use_amp,
 
 
 def make_target_batch(model, batch, device, use_amp,
-                      head):
+                      head, encoder_grad=False):
     """Build a target batch with CrossEntropyLoss
     (single-select softmax, 256-dim candidate features)."""
     max_c = max(s['n_candidates'] for s in batch)
@@ -639,7 +645,9 @@ def make_target_batch(model, batch, device, use_amp,
         stm[i] = torch.from_numpy(masks['stack_mask'])
 
     with torch.amp.autocast('cuda', enabled=use_amp):
-        with torch.no_grad():
+        ctx = torch.no_grad() if not encoder_grad \
+            else nullcontext()
+        with ctx:
             state_emb = model.encode_state(
                 gf, mb, mbm, ob, obm, h, hm,
                 mg, mgm, og, ogm, st, stm)
@@ -654,7 +662,8 @@ def make_target_batch(model, batch, device, use_amp,
     return loss, correct, bs
 
 
-def make_mulligan_batch(model, batch, device, use_amp, head):
+def make_mulligan_batch(model, batch, device, use_amp, head,
+                        encoder_grad=False):
     """Build a mulligan batch — binary keep/mull from hand features."""
     max_c = max(s.get('n_cards', 7) for s in batch)
     max_c = max(max_c, 1)
@@ -704,7 +713,9 @@ def make_mulligan_batch(model, batch, device, use_amp, head):
         stm[i] = torch.from_numpy(masks['stack_mask'])
 
     with torch.amp.autocast('cuda', enabled=use_amp):
-        with torch.no_grad():
+        ctx = torch.no_grad() if not encoder_grad \
+            else nullcontext()
+        with ctx:
             state_emb = model.encode_state(
                 gf, mb, mbm, ob, obm, h, hmask,
                 mg, mgm, og, ogm, st, stm)
@@ -720,7 +731,8 @@ def make_mulligan_batch(model, batch, device, use_amp, head):
     return loss, correct, bs
 
 
-def make_binary_batch(model, batch, device, use_amp, head):
+def make_binary_batch(model, batch, device, use_amp, head,
+                      encoder_grad=False):
     """Build a binary batch — yes/no from game state only."""
     bs = len(batch)
     cd = CARD_DIM
@@ -761,7 +773,9 @@ def make_binary_batch(model, batch, device, use_amp, head):
         stm[i] = torch.from_numpy(masks['stack_mask'])
 
     with torch.amp.autocast('cuda', enabled=use_amp):
-        with torch.no_grad():
+        ctx = torch.no_grad() if not encoder_grad \
+            else nullcontext()
+        with ctx:
             state_emb = model.encode_state(
                 gf, mb, mbm, ob, obm, h, hm,
                 mg, mgm, og, ogm, st, stm)
@@ -777,8 +791,62 @@ def make_binary_batch(model, batch, device, use_amp, head):
     return loss, correct, bs
 
 
+def make_value_batch(model, batch, device, use_amp,
+                     head=None, encoder_grad=False):
+    """Build a value batch — MSE on game outcome.
+    batch is a list of dicts from MmapValueDataset."""
+    import torch.utils.data as tud
+
+    # Stack tensors from list of dicts
+    gf = torch.stack([s['global_features'] for s in batch]
+                     ).to(device)
+    mb = torch.stack([s['my_board'] for s in batch]
+                     ).to(device)
+    mbm = torch.stack([s['my_board_mask'] for s in batch]
+                      ).to(device)
+    ob = torch.stack([s['opp_board'] for s in batch]
+                     ).to(device)
+    obm = torch.stack([s['opp_board_mask'] for s in batch]
+                      ).to(device)
+    h = torch.stack([s['hand'] for s in batch]).to(device)
+    hm = torch.stack([s['hand_mask'] for s in batch]
+                     ).to(device)
+    mg = torch.stack([s['my_gy'] for s in batch]
+                     ).to(device)
+    mgm = torch.stack([s['my_gy_mask'] for s in batch]
+                      ).to(device)
+    og = torch.stack([s['opp_gy'] for s in batch]
+                     ).to(device)
+    ogm = torch.stack([s['opp_gy_mask'] for s in batch]
+                      ).to(device)
+    st = torch.stack([s['stack'] for s in batch]
+                     ).to(device)
+    stm = torch.stack([s['stack_mask'] for s in batch]
+                      ).to(device)
+    tgt = torch.stack([s['value_target'] for s in batch]
+                      ).to(device)
+
+    bs = len(batch)
+
+    with torch.amp.autocast('cuda', enabled=use_amp):
+        ctx = torch.no_grad() if not encoder_grad \
+            else nullcontext()
+        with ctx:
+            state_emb = model.encode_state(
+                gf, mb, mbm, ob, obm, h, hm,
+                mg, mgm, og, ogm, st, stm)
+
+        pred = model.get_value(state_emb).squeeze(-1)
+        loss = nn.functional.mse_loss(pred, tgt)
+
+    with torch.no_grad():
+        correct = ((pred > 0) == (tgt > 0)).sum().item()
+
+    return loss, correct, bs
+
+
 def make_block_batch(model, batch, device, use_amp,
-                     head):
+                     head, encoder_grad=False):
     """Build a block batch for the BlockHead.
 
     Block data has (blocker,attacker) pair features (256-dim).
@@ -909,7 +977,9 @@ def make_block_batch(model, batch, device, use_amp,
         stm[i] = torch.from_numpy(masks['stack_mask'])
 
     with torch.amp.autocast('cuda', enabled=use_amp):
-        with torch.no_grad():
+        ctx = torch.no_grad() if not encoder_grad \
+            else nullcontext()
+        with ctx:
             state_emb = model.encode_state(
                 gf, mb, mbm, ob, obm, h, hm,
                 mg, mgm, og, ogm, st, stm)
@@ -1700,6 +1770,279 @@ def train_priority_head_mmap(model, head,
     return best_acc
 
 
+def train_joint_mmap(model, head_configs, args, state,
+                     device, use_amp):
+    """Train all heads jointly with unfrozen encoder.
+
+    head_configs: list of (head_name, head, train_ds,
+                           val_ds, batch_fn)
+    Encoder gets gradients from all heads (accumulated),
+    stepped once per round-robin cycle.
+    """
+    import torch.utils.data as tud
+
+    state.status = "Joint training (encoder unfrozen)..."
+    log(state, "\n=== Joint training: encoder + all heads ===")
+
+    # Unfreeze encoder; value network unfrozen if in configs
+    has_value = any(name == 'value' for name, *_ in
+                    head_configs)
+    for p in model.state_encoder.parameters():
+        p.requires_grad = True
+    for p in model.value_network.parameters():
+        p.requires_grad = has_value
+
+    encoder_params = list(model.state_encoder.parameters())
+    encoder_lr = args.lr * 0.1
+    encoder_optimizer = optim.AdamW(
+        encoder_params, lr=encoder_lr, weight_decay=1e-4)
+    encoder_scheduler = optim.lr_scheduler.CosineAnnealingLR(
+        encoder_optimizer, T_max=args.epochs)
+
+    log(state, f"Encoder LR: {encoder_lr:.1e}, "
+        f"Head LR: {args.lr:.1e}")
+    log(state, f"Encoder params: "
+        f"{sum(p.numel() for p in encoder_params):,}")
+
+    # Per-head setup
+    head_optimizers = {}
+    head_schedulers = {}
+    head_loaders = {}
+    head_val_loaders = {}
+    head_best_acc = {}
+    scaler = torch.amp.GradScaler('cuda') if use_amp \
+        else None
+
+    for name, head, train_ds, val_ds, batch_fn in \
+            head_configs:
+        for p in head.parameters():
+            p.requires_grad = True
+        head_optimizers[name] = optim.AdamW(
+            head.parameters(), lr=args.lr,
+            weight_decay=1e-4)
+        head_schedulers[name] = \
+            optim.lr_scheduler.CosineAnnealingLR(
+                head_optimizers[name], T_max=args.epochs)
+        head_loaders[name] = tud.DataLoader(
+            train_ds, batch_size=args.batch_size,
+            shuffle=True, num_workers=0,
+            collate_fn=lambda x: x)
+        head_val_loaders[name] = tud.DataLoader(
+            val_ds, batch_size=args.batch_size,
+            shuffle=False, num_workers=0,
+            collate_fn=lambda x: x)
+        head_best_acc[name] = 0.0
+        n_params = sum(p.numel() for p in head.parameters())
+        log(state, f"  {name}: {len(train_ds)} train, "
+            f"{len(val_ds)} val, {n_params:,} params")
+
+    start = time.time()
+    save_path = os.path.join(
+        args.save_dir, 'model_with_decisions.pt')
+
+    for epoch in range(1, args.epochs + 1):
+        state.epoch = epoch
+        state.status = (
+            f"Joint training: epoch {epoch}/{args.epochs}")
+        t0 = time.time()
+        model.train()
+
+        # Create iterators for all heads
+        head_iters = {
+            name: iter(head_loaders[name])
+            for name in head_loaders}
+
+        # Track per-head stats
+        head_stats = {name: {'loss': 0, 'correct': 0,
+                             'total': 0, 'batches': 0}
+                      for name in head_loaders}
+
+        # Round-robin training
+        active_heads = set(head_iters.keys())
+        batch_count = 0
+        while active_heads:
+            encoder_optimizer.zero_grad()
+            for hname in head_optimizers:
+                head_optimizers[hname].zero_grad()
+
+            # One batch from each active head
+            finished = set()
+            ran_this_cycle = set()
+            for name in list(active_heads):
+                try:
+                    batch = next(head_iters[name])
+                except StopIteration:
+                    finished.add(name)
+                    continue
+
+                if len(batch) < 2:
+                    continue
+
+                # Find the batch_fn and head for this name
+                batch_fn = None
+                head = None
+                for cfg in head_configs:
+                    if cfg[0] == name:
+                        batch_fn = cfg[4]
+                        head = cfg[1]
+                        break
+
+                loss, correct, total = batch_fn(
+                    model, batch, device, use_amp, head,
+                    encoder_grad=True)
+
+                if scaler:
+                    scaler.scale(loss).backward()
+                else:
+                    loss.backward()
+
+                ran_this_cycle.add(name)
+                head_stats[name]['loss'] += \
+                    loss.item() * total
+                head_stats[name]['correct'] += correct
+                head_stats[name]['total'] += total
+                head_stats[name]['batches'] += 1
+
+            active_heads -= finished
+            batch_count += 1
+
+            # Skip optimizer step if nothing ran
+            if not ran_this_cycle:
+                continue
+
+            # Unscale, clip, step — only for optimizers
+            # that had gradients this cycle
+            if scaler:
+                scaler.unscale_(encoder_optimizer)
+                for hname in ran_this_cycle:
+                    scaler.unscale_(
+                        head_optimizers[hname])
+
+            torch.nn.utils.clip_grad_norm_(
+                encoder_params, 1.0)
+            for hname in ran_this_cycle:
+                torch.nn.utils.clip_grad_norm_(
+                    [p for p in head_optimizers[hname]
+                     .param_groups[0]['params']], 1.0)
+
+            if scaler:
+                scaler.step(encoder_optimizer)
+                for hname in ran_this_cycle:
+                    scaler.step(
+                        head_optimizers[hname])
+                scaler.update()
+            else:
+                encoder_optimizer.step()
+                for hname in ran_this_cycle:
+                    head_optimizers[hname].step()
+
+            state.epoch_progress = min(
+                batch_count / max(
+                    max(len(l) for l in
+                        head_loaders.values()), 1),
+                1.0)
+
+        # Step schedulers
+        encoder_scheduler.step()
+        for name in head_schedulers:
+            head_schedulers[name].step()
+
+        # Validation
+        model.eval()
+        head_val_stats = {name: {'loss': 0, 'correct': 0,
+                                  'total': 0}
+                          for name in head_val_loaders}
+        with torch.no_grad():
+            for name in head_val_loaders:
+                batch_fn = None
+                head = None
+                for cfg in head_configs:
+                    if cfg[0] == name:
+                        batch_fn = cfg[4]
+                        head = cfg[1]
+                        break
+                for batch in head_val_loaders[name]:
+                    if len(batch) < 2:
+                        continue
+                    loss, correct, total = batch_fn(
+                        model, batch, device, use_amp, head)
+                    head_val_stats[name]['loss'] += \
+                        loss.item() * total
+                    head_val_stats[name]['correct'] += \
+                        correct
+                    head_val_stats[name]['total'] += total
+
+        # Log results
+        log_parts = [f"Epoch {epoch:>3d}/{args.epochs}"]
+        any_improved = False
+        for name in sorted(head_stats.keys()):
+            ts = head_stats[name]
+            vs = head_val_stats[name]
+            ta = ts['correct'] / max(ts['total'], 1)
+            va = vs['correct'] / max(vs['total'], 1)
+            tl = ts['loss'] / max(ts['total'], 1)
+            vl = vs['loss'] / max(vs['total'], 1)
+
+            # Track per-head lists for chart
+            tl_list = getattr(
+                state, f'{name}_train_losses', None)
+            if tl_list is not None:
+                tl_list.append(tl)
+            ta_list = getattr(
+                state, f'{name}_train_accs', None)
+            if ta_list is not None:
+                ta_list.append(ta)
+            vl_list = getattr(
+                state, f'{name}_val_losses', None)
+            if vl_list is not None:
+                vl_list.append(vl)
+            va_list = getattr(
+                state, f'{name}_val_accs', None)
+            if va_list is not None:
+                va_list.append(va)
+
+            improved = ''
+            if va > head_best_acc[name]:
+                head_best_acc[name] = va
+                improved = '*'
+                any_improved = True
+            setattr(state, f'{name}_best_acc',
+                    head_best_acc[name])
+
+            log_parts.append(
+                f"{name}={va:.1%}{improved}")
+
+        log(state, "  " + " | ".join(log_parts))
+
+        # Save if any head improved
+        if any_improved:
+            model.save(save_path)
+            log(state, f"  Saved: {save_path}")
+
+        state.epoch_time = time.time() - t0
+        state.elapsed = time.time() - start
+        state.eta = (args.epochs - epoch) * state.epoch_time
+        state.epoch_progress = 1.0
+        state.chart_dirty = True
+
+        if device.startswith('cuda'):
+            torch.cuda.synchronize()
+            state.gpu_mem_used_mb = (
+                torch.cuda.memory_allocated() / 1024**2)
+            state.gpu_mem_total_mb = (
+                torch.cuda.get_device_properties(0)
+                .total_memory / 1024**2)
+
+        time.sleep(0.05)
+
+    log(state, "\n=== Joint training complete ===")
+    for name in sorted(head_best_acc.keys()):
+        log(state, f"  {name}: best val acc "
+            f"{head_best_acc[name]:.1%}")
+
+    return head_best_acc
+
+
 def trainer_thread(state, args):
     try:
         profile = auto_detect_profile()
@@ -1880,6 +2223,84 @@ def trainer_thread(state, args):
         os.makedirs(args.save_dir, exist_ok=True)
 
         log(state, f"Heads to train: {heads_list}")
+
+        # Joint training mode: all heads + value + unfrozen encoder
+        if getattr(args, 'joint', False) and use_mmap:
+            # Load value dataset for joint training
+            from training.mmap_dataset import MmapValueDataset
+            value_train_ds = MmapValueDataset(
+                preprocessed_dir, train=True)
+            value_val_ds = MmapValueDataset(
+                preprocessed_dir, train=False)
+            log(state, f"Value: {len(value_train_ds)} train, "
+                f"{len(value_val_ds)} val (joint)")
+
+            head_configs = []
+            # Include value network
+            head_configs.append((
+                'value', model.value_network,
+                value_train_ds, value_val_ds,
+                make_value_batch))
+            if 'priority' in heads_list and \
+                    priority_train_ds:
+                head_configs.append((
+                    'priority', model.priority_head,
+                    priority_train_ds, priority_val_ds,
+                    make_priority_batch))
+            if 'attack' in heads_list and \
+                    attack_train_ds:
+                head_configs.append((
+                    'attack', model.attack_head,
+                    attack_train_ds, attack_val_ds,
+                    make_batch))
+            if 'block' in heads_list and \
+                    block_train_ds:
+                head_configs.append((
+                    'block', model.block_head,
+                    block_train_ds, block_val_ds,
+                    make_block_batch))
+            if 'target' in heads_list and \
+                    target_train_ds:
+                head_configs.append((
+                    'target', model.target_head,
+                    target_train_ds, target_val_ds,
+                    make_target_batch))
+            if 'card_select' in heads_list and \
+                    card_select_train_ds:
+                head_configs.append((
+                    'card_select', model.card_select_head,
+                    card_select_train_ds,
+                    card_select_val_ds,
+                    make_batch))
+            if 'mulligan' in heads_list and \
+                    mulligan_train_ds:
+                head_configs.append((
+                    'mulligan', model.mulligan_head,
+                    mulligan_train_ds, mulligan_val_ds,
+                    make_mulligan_batch))
+            if 'binary' in heads_list and \
+                    binary_train_ds:
+                head_configs.append((
+                    'binary', model.binary_head,
+                    binary_train_ds, binary_val_ds,
+                    make_binary_batch))
+
+            if head_configs:
+                train_joint_mmap(
+                    model, head_configs, args, state,
+                    device, use_amp)
+
+                # Save combined model
+                save_path = os.path.join(
+                    args.save_dir,
+                    'model_with_decisions.pt')
+                model.save(save_path)
+                log(state, f"\nModel saved: {save_path}")
+
+                state.status = "Training complete!"
+                state.phase = "done"
+                state.chart_dirty = True
+                return  # skip sequential training
 
         # Train priority head first (softmax CE, not BCE)
         if 'priority' in heads_list:
@@ -2257,6 +2678,9 @@ def main():
     parser.add_argument('--heads', default='all',
         help='Comma-separated heads to train: '
              'priority,attack,block or "all"')
+    parser.add_argument('--joint', action='store_true',
+        help='Train all heads jointly with unfrozen '
+             'encoder')
     args = parser.parse_args()
 
     state = TrainingState()

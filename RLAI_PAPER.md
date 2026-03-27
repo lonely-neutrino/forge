@@ -106,7 +106,7 @@ The global feature vector captures non-card-specific game state:
 | 64-69 | Color devotion (WUBRGC) | [0,1] over [0, 15] |
 | 70 | Castable cards in hand | [0,1] over [0, 10] |
 | 72-75 | Enchantment/artifact counts (both players) | [0,1] over [0, 10] |
-| 76-95 | Reserved | 0 |
+| 76-95 | Combat globals (total power/toughness, evasive power, can_attack/block counts, lethal checks, board advantage, combat keywords) | Normalized |
 
 #### 2.2.2 Card Features (256 dimensions per card)
 
@@ -146,7 +146,8 @@ Each card in any zone is encoded as a 256-dimensional vector:
 | 205 | Host is creature | Binary flag |
 | 206 | Host is mine | Binary flag |
 | 207 | Host CMC | Normalized |
-| 208-251 | Reserved | 0 |
+| 208-232 | Combat math (can_attack, evasive, kill/survive ratios, combat keywords, net_combat_value) | Normalized |
+| 233-251 | Reserved | 0 |
 | 252-255 | Card identity hash (4 bytes, normalized) | [0,1] per byte |
 
 The expanded encoding allows the model to see what cards *do* — their ability types, effects, mana production, and triggers — rather than just their static characteristics. The ownership flags (190-191) are critical: they allow the model to distinguish friendly from enemy cards when selecting targets, blocking, or choosing cards for effects. Without these flags, the model could not tell its own creatures from the opponent's in a mixed candidate list — leading to errors like using removal spells on friendly creatures. Trigger effect encoding (192-199) goes beyond binary presence flags to capture what each trigger actually does (DealDamage vs Draw vs Pump) and how much. Aura/equipment host encoding (202-207) enables reasoning about attachment effects. The card identity hash enables learned embeddings for specific cards.
@@ -306,7 +307,7 @@ At ~43MB in fp32, the full model fits comfortably on consumer GPUs (~51MB VRAM f
 
 Training proceeds in three phases, each building on the previous:
 
-1. **Imitation learning** (Section 3.1). The model learns to mimic the existing heuristic AI by observing its decisions across 1,000 games. This produces a policy that plays at rough parity with the heuristic — a warm start that avoids the intractable exploration problem of learning MTG from scratch. Training is sequential: first the shared game state encoder and value network learn board evaluation from discounted returns, then each of the 7 decision heads is trained independently to predict the heuristic's choices. The encoder is frozen after value training to protect the learned representation.
+1. **Imitation learning** (Section 3.1). The model learns to mimic the existing heuristic AI by observing its decisions across 1,000 games. This produces a policy that plays at rough parity with the heuristic — a warm start that avoids the intractable exploration problem of learning MTG from scratch. Training uses joint multi-task optimization: the shared encoder, value network, and all 7 decision heads are trained simultaneously via round-robin batching. This ensures the encoder learns representations useful for all downstream tasks, not just value prediction.
 
 2. **PPO reinforcement learning** (Section 3.2). The imitation-learned policy plays against the heuristic AI, collecting trajectories with action probabilities and intermediate rewards. Generalized Advantage Estimation (GAE) assigns per-decision credit, and PPO's clipped objective conservatively updates the policy toward actions that led to better outcomes. The model explores stochastically during data collection but deploys deterministically (argmax) — the goal is to improve the underlying probability distribution so that even greedy play surpasses the heuristic.
 
@@ -341,7 +342,7 @@ Each game produces two trajectory files (one per player perspective), containing
 
 **Preprocessing and discounted returns.** Raw trajectory JSONL files are preprocessed into memory-mapped numpy arrays for efficient training (18.8 GB for 127K records). During preprocessing, discounted returns are computed backward through each trajectory:
 
-$$G_t = r_t + \gamma G_{t+1} \quad (\gamma = 0.95)$$
+$$G_t = r_t + \gamma G_{t+1} \quad (\gamma = 0.99)$$
 
 where $r_t$ includes the intermediate reward shaping signal and the terminal reward (+1/-1) on the final step. This produces value targets where early-game decisions are near 0 (high uncertainty) and late-game decisions approach ±1 (outcome nearly determined). The value network learns to predict these discounted returns, giving it calibrated confidence rather than treating every game state as equally certain.
 
@@ -355,7 +356,7 @@ We note a critical implementation constraint: the Forge game engine performs cla
 
 The value network is trained first as it provides the foundation for all subsequent training:
 
-- **Task.** Predict discounted return $G_t$ from any mid-game state, where $G_t = r_t + \gamma G_{t+1}$ ($\gamma = 0.95$). Early-game targets are near 0 (uncertain outcome); late-game targets approach ±1 (determined outcome). This gives the value network calibrated confidence — it learns that a turn-2 board state is inherently uncertain, while a turn-12 state with one player at 2 life is nearly decided.
+- **Task.** Predict discounted return $G_t$ from any mid-game state, where $G_t = r_t + \gamma G_{t+1}$ ($\gamma = 0.99$). Early-game targets are near 0 (uncertain outcome); late-game targets approach ±1 (determined outcome). This gives the value network calibrated confidence — it learns that a turn-2 board state is inherently uncertain, while a turn-12 state with one player at 2 life is nearly decided.
 - **Data.** ~127,000 decision snapshots from 1,000 games, captured at every decision point across all 7 types.
 - **Loss.** Mean squared error between predicted value and discounted return.
 - **Optimization.** AdamW (lr=3×10⁻⁴, weight decay=10⁻⁴), cosine annealing schedule, gradient clipping at 1.0.
@@ -365,7 +366,7 @@ The feature encoding captures pre-decision state (creatures are recorded as unta
 
 #### 3.1.3 Decision Head Training
 
-After the value network converges, we freeze the encoder weights and train each decision head independently, chaining checkpoints so each head inherits all previously trained weights:
+Initially, heads were trained sequentially with a frozen encoder. However, encoder reconstruction analysis revealed the value-only encoder retained only 24% R² of basic game state features (opponent life R²=-0.02, creature counts R²<0). We now use **joint multi-task training**: the encoder, value network, and all heads train simultaneously via round-robin batching with the encoder at 1/10th LR. After 3 epochs, encoder R² improved to 0.47 (basic globals) and 0.54 (combat features). Per-head details:
 
 **Priority Head.** Cross-entropy loss over available actions (softmax single-select) with **inverse-frequency class weighting**. Trained on ~104,500 priority decisions with the full mechanically-legal candidate set. Each decision includes 1-7 playable spells plus a pass option, with 64-dim action features per candidate. The heuristic passes priority ~85% of the time even with playable spells available. Without weighting, the model learns a pass-heavy distribution that achieves high accuracy (93.9%) but performs poorly under the stochastic sampling required for PPO exploration — analysis showed a 78% creature miss rate during own main phases. Per-sample inverse-frequency weighting (`n_pass/n_total` for play decisions, `n_play/n_total` for pass decisions) equalizes the gradient contribution of play vs pass actions, encouraging a more balanced probability distribution while preserving the timing signal from genuine pass decisions.
 
@@ -405,11 +406,11 @@ This says: "the advantage of this decision is the immediate reward $r_t$ plus ho
 
 $$\hat{A}_t = \sum_{l=0}^{T-t} (\gamma\lambda)^l \delta_{t+l}$$
 
-When $\lambda = 0$, GAE reduces to the one-step TD residual (low variance, high bias). When $\lambda = 1$, it approaches the Monte Carlo return (high variance, low bias). We use $\lambda = 0.90$, which puts substantial weight on per-step value improvements rather than terminal game outcomes — appropriate for short-episode, high-variance games where individual decision quality matters more than the eventual win/loss.
+When $\lambda = 0$, GAE reduces to the one-step TD residual (low variance, high bias). When $\lambda = 1$, it approaches the Monte Carlo return (high variance, low bias). We use $\lambda = 0.95$ (updated from 0.90), giving an effective horizon of ~20 steps — sufficient for early-game decisions to receive meaningful credit assignment in games lasting 13-15 turns on average.
 
 **Concrete example in MTG:** Consider a game where the RL agent casts a creature on turn 3 ($t=3$), then on turn 4 the opponent fails to remove it, and on turn 5 the creature attacks for lethal. The TD residual at $t=3$ captures the immediate board advantage change ($r_3$) plus the value improvement. GAE propagates the turn-5 lethal attack backward through the chain of TD residuals, giving the turn-3 creature cast a positive advantage — it recognizes that playing the creature led to winning.
 
-The discount factor $\gamma = 0.95$ must match the gamma used to train the value network (Section 5.1). This matching is critical: the GAE delta $\delta_t = r_t + \gamma V(s_{t+1}) - V(s_t)$ measures "did this decision improve the position relative to the value function's expectation." If GAE uses a different $\gamma$ than the value network was trained with, the Bellman residuals become systematically biased — the deltas no longer measure decision quality but instead reflect the gamma mismatch. With matched $\gamma = 0.95$, a well-calibrated value network produces near-zero deltas for expected transitions, positive deltas for decisions that improved the position beyond expectation, and negative deltas for decisions that worsened it.
+The discount factor $\gamma = 0.99$ (updated from 0.95) must match the gamma used to train the value network. This matching is critical: the GAE delta $\delta_t = r_t + \gamma V(s_{t+1}) - V(s_t)$ measures "did this decision improve the position relative to the value function's expectation." If GAE uses a different $\gamma$ than the value network was trained with, the Bellman residuals become systematically biased — the deltas no longer measure decision quality but instead reflect the gamma mismatch. With matched $\gamma = 0.99$, a well-calibrated value network produces near-zero deltas for expected transitions, positive deltas for decisions that improved the position beyond expectation, and negative deltas for decisions that worsened it.
 
 #### 3.2.3 PPO: How the Policy Improves
 
@@ -441,11 +442,11 @@ With $\epsilon = 0.1$, the ratio is clamped to $[0.9, 1.1]$, limiting each updat
 
 **The total loss** combines three terms:
 
-$$L = L^{CLIP} + 0.5 \cdot L^{VF} - 0.005 \cdot H[\pi_\theta]$$
+$$L = L^{CLIP} + 0.5 \cdot L^{VF} - 0.03 \cdot H[\pi_\theta]$$
 
 - **Policy loss** ($L^{CLIP}$): Moves the policy toward actions with positive advantage, away from actions with negative advantage.
 - **Value loss** ($L^{VF}$): MSE between the value network's prediction and the actual discounted return. This improves the critic, which provides better advantage estimates in future rounds — creating a virtuous cycle where better value estimates lead to more accurate advantages, which lead to better policy updates.
-- **Entropy bonus** ($H[\pi_\theta]$): Encourages the policy to maintain some randomness, preventing premature convergence to a deterministic strategy. Without entropy, the model might collapse to "always pass" (the safest action) and never explore alternatives. The small coefficient (0.005) provides mild exploration without destabilizing the learned policy.
+- **Entropy bonus** ($H[\pi_\theta]$): Encourages the policy to maintain some randomness, preventing premature convergence to a deterministic strategy. Without entropy, the model might collapse to "always pass" (the safest action) and never explore alternatives. The coefficient was increased from 0.005 to 0.03 after observing entropy declining to 0.2-0.3 during initial PPO runs, indicating premature policy collapse that prevented exploration of better strategies.
 
 #### 3.2.4 Reward Shaping
 
@@ -534,7 +535,7 @@ Data collection at 1.6 games/second produces sufficient training data in minutes
 
 ### 5.1 Data Collection
 
-We collected 1,000 games between four constructed decks (Red Aggro, Green Stompy, White Weenie, Blue Tempo) using 16-thread parallel execution in 742 seconds (12 minutes). This produced:
+We collected 1,000 games between four constructed decks (Red Aggro, Green Stompy, White Weenie, Mono Blue Tempo) using 16-thread parallel execution. The Blue Tempo deck was updated from a Delver/Counterspell list (which the heuristic AI could barely play, winning only 5-15%) to a Mono Blue Tempest Djinn build (Mist-Cloaked Herald, Siren Stormtamer, Tempest Djinn, Curious Obsession, Wizard's Retort) which achieved 44% heuristic win rate — creating a much healthier training meta (Green 61%, White 56%, Blue 44%, Red 38%). Collection produced:
 
 | Metric | Value |
 |--------|-------|
@@ -578,11 +579,11 @@ Train/val splits use game-level grouping (both P1/P2 perspectives in the same sp
 
 #### 5.3.1 Going-First Asymmetry and Class Imbalance
 
-Evaluation of the imitation-learned model under argmax (ONNX deployment) shows 54% overall win rate against the heuristic — at parity — but with a stark positional asymmetry: 34% win rate going first vs 74% going second. By comparison, the heuristic vs itself shows only a mild going-second advantage (47%/53%) in these aggro matchups.
+Evaluation of the imitation-learned model shows approximately 29-31% win rate against the heuristic AI under both argmax and stochastic sampling. Note: earlier reported "54%" win rates were artifacts of a heuristic fallback bug where the ONNX flag was silently ignored, causing the model to delegate decisions to the heuristic rather than making its own choices.
 
-Analysis of the model's probability distribution reveals the cause: during own main phases with creatures available, the model passes 78% of the time. This pass-heavy distribution — learned from the 85% pass rate in imitation data — is masked by argmax (which always picks the top action, often correctly) but exposed under the stochastic sampling required for PPO exploration. The model learned an exaggerated version of the heuristic's going-second preference because reactive play patterns (holding removal, blocking) are easier to learn from pass-heavy data than proactive patterns (playing creatures on curve).
+Analysis of the model's probability distribution reveals that during own main phases with creatures available, the model passes 78% of the time. This pass-heavy distribution — learned from the 85% pass rate in imitation data — means the model rarely deploys threats proactively. Under stochastic sampling (required for PPO exploration), this manifests as very low spells-per-turn (~0.5-0.6).
 
-The class-weighted cross-entropy fix (Section 3.1.3) addresses this by equalizing gradient contribution between play and pass decisions, encouraging the model to develop a more balanced probability distribution that supports both greedy deployment (argmax) and effective exploration (sampling for PPO).
+The class-weighted cross-entropy fix (Section 3.1.3) addresses this by equalizing gradient contribution between play and pass decisions, encouraging a more balanced probability distribution.
 
 ### 5.4 PPO Training
 
@@ -606,17 +607,18 @@ Each PPO round consists of four phases:
 
 4. **Evaluation.** Every round, 100 evaluation games are played against the heuristic AI to track win rate. The model is saved if the eval win rate improves.
 
-#### 5.4.2 Frozen Encoder with Differential Learning Rates
+#### 5.4.2 Encoder Strategy During PPO
 
-A critical design choice: the game state encoder is frozen during PPO. Only the decision heads and value network receive gradient updates, with different learning rates:
+Initially, the encoder was frozen during PPO to protect representations learned from 127K imitation samples. Weight analysis after 43 PPO rounds confirmed the heads were changing meaningfully (10-20% L2 drift) but win rates plateaued at 30-39%. Encoder reconstruction analysis revealed the frozen encoder was the ceiling — it retained only 24% R² of basic game state features and discarded combat math information.
 
-| Component | Learning Rate | Rationale |
-|-----------|--------------|-----------|
-| State encoder | 0 (frozen) | Protects the game state representation learned from 127K imitation samples |
-| Decision heads | 3×10⁻⁵ | Conservative updates to avoid destroying imitation-learned behavior |
-| Value network | 1×10⁻⁴ | Faster adaptation since the value function must track the changing policy |
+The solution was two-fold: (1) joint multi-task training during imitation learning (encoder + value + all heads simultaneously), producing an encoder that retains decision-critical information (R² improved to 0.47); (2) PPO hyperparameter improvements:
 
-This is motivated by the observation that the encoder's representation is trained on 10-100× more data than any single PPO round produces. Allowing PPO gradients to flow through the encoder would adapt a 3.5M-parameter encoder based on a few hundred games, likely degrading the representation.
+| Parameter | Previous | Updated | Rationale |
+|-----------|----------|---------|-----------|
+| GAE gamma | 0.95 | 0.99 | Better credit assignment for early-game decisions (30-step discount: 0.21 → 0.74) |
+| GAE lambda | 0.90 | 0.95 | Longer effective horizon (~7 → ~20 steps) |
+| Entropy coeff | 0.005 | 0.03 | Prevents policy collapse; entropy was declining to 0.2-0.3 |
+| Games/round | 400 | 800 | More data per update, especially for rare heads (block, binary) |
 
 #### 5.4.3 Reward Shaping and Credit Assignment
 
@@ -644,7 +646,11 @@ Initial PPO results (20 rounds × 100 games) show no sustained improvement: coll
 
 This does not necessarily mean PPO cannot work at our scale, but it suggests that either (a) dramatically more compute is needed (200K+ games), or (b) a more sample-efficient algorithm is required. Advantage-Weighted Regression (AWR) is a promising alternative: it collects data under argmax play, computes GAE advantages per decision, and updates the policy by weighting the supervised loss by advantage magnitude. This eliminates the exploration problem that degrades PPO's data quality — the model learns from its best play rather than its stochastic exploration. See Peng et al. (2019), "Advantage-Weighted Regression: Simple and Scalable Off-Policy Reinforcement Learning."
 
-**Results.** PPO training is in progress. Results will be reported after retraining with the current v4 feature encoding on randomized matchup data.
+**Results (2026-03-26).** PPO vs heuristic ran for 43 rounds (17,200 games). Win rate oscillated between 19-39% with no sustained upward trend. Best: 39% at round 21. Per-deck breakdown: White 40-67%, Green 30-50%, Red 15-40%, Blue (old deck) 4-17%. Spells per turn remained flat at 0.50-0.57 (less than 1 spell/turn for aggro decks). Attack aggression stuck at 55%.
+
+Weight drift analysis confirmed the policy was changing: priority head L2 drift 5.2→14.9, attack 3.3→9.0, value network 11.4→33.0 over rounds 5-40. The model found a gradient signal and moved weights consistently — but improvements didn't translate to wins because the frozen encoder was the ceiling.
+
+After implementing joint encoder training and PPO hyperparameter improvements (gamma 0.95→0.99, entropy 0.005→0.03, 800 games/round), the Blue Tempo deck was replaced with a simpler Mono Blue Tempest Djinn list (MTGGoldfish #1361608) which the heuristic can actually play (44% vs heuristic, up from 5-15%). PPO training with the jointly-trained encoder and improved hyperparameters is in progress.
 
 ---
 
@@ -745,10 +751,10 @@ Ward, C. D. & Cowling, P. I. (2009). Monte Carlo search applied to card selectio
 | Gradient clipping | 1.0 |
 | Batch size | 64 |
 | PPO clip epsilon | 0.1 |
-| Discount factor (γ) | 0.95 |
-| GAE lambda (λ) | 0.90 |
+| Discount factor (γ) | 0.99 |
+| GAE lambda (λ) | 0.95 |
 | Value loss coefficient | 0.5 |
-| Entropy coefficient | 0.005 |
+| Entropy coefficient | 0.03 |
 
 ## Appendix B: Card Feature Index Reference
 
