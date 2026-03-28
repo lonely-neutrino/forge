@@ -469,13 +469,17 @@ Win rates are measured against the heuristic AI. Advancement thresholds decrease
 
 #### 3.2.6 League Training
 
-Following the AlphaStar approach (Vinyals et al., 2019), we maintain a population of agents:
+A key challenge with PPO training against a fixed heuristic opponent is heavily skewed signal: when the RL model loses ~70% of games, most trajectories provide "everything was wrong" gradients, making it difficult for PPO to identify which specific actions were actually beneficial. Analysis of the value network's predictions confirms the problem — at turn 4, the model's average value estimate for games it goes on to win is still negative (-0.20), and prediction accuracy at turns 1-5 is only 73-80%. The value network becomes useful around turn 7 but the most consequential decisions (deploying threats, curving out) happen in turns 1-5.
 
-- **Main agents** (3): Train against all opponents in the league, including historical snapshots.
-- **Exploiter agents** (2): Specifically target weaknesses in current main agents to prevent strategy cycling.
-- **Historical snapshots**: Checkpoints saved periodically, serving as fixed opponents to prevent catastrophic forgetting.
+Our solution is league-based training inspired by AlphaStar (Vinyals et al., 2019), adapted for single-agent training with a checkpoint pool:
 
-Elo ratings track relative strength across the population, providing an objective measure of improvement independent of win rate against any single opponent.
+**Opponent pool.** We maintain a pool of historical model snapshots plus (optionally) the heuristic AI as a fixed opponent. Snapshots are saved every 5 PPO rounds and assigned an Elo rating at the time of creation. The pool is capped at 15 snapshots, with the weakest (lowest Elo) pruned when full.
+
+**Elo-based opponent selection.** Each collection round, opponents are selected from the pool weighted by Elo proximity to the current model: $w_i = \exp(-|E_{\text{current}} - E_i| / \tau)$ where $\tau = 200$ is a temperature parameter. This naturally produces ~50% win rate in collection games — opponents near the current model's Elo are close matches, while much stronger or weaker opponents are down-weighted. Games are allocated proportionally across up to 3 selected opponents per round.
+
+**Bootstrapping.** The pool starts empty, so early rounds (1-4) use pure self-play: both players are the current model, guaranteeing 50/50 signal. After round 5, the first snapshot enters the pool. As the model improves, it outgrows older snapshots and the Elo selection automatically shifts toward harder opponents. The heuristic AI (Elo ~1200) is added to the pool once the model's eval win rate reaches 35%.
+
+**Implementation.** A new Java `leagueplay` mode supports per-player gRPC port assignment: the current (training) model serves on one set of ports, the opponent checkpoint serves on another set. This allows both models to run independently — the current model uses stochastic sampling (required for PPO exploration) while opponents play deterministically. Trajectories are recorded for the current model only.
 
 ### 3.3 Phase 3: Progressive Scaling
 
@@ -632,7 +636,15 @@ MTG's terminal reward (win/loss) is extremely sparse — a game involves 50-400 
 | Card advantage change | ±0.05 per card | Card advantage is a fundamental MTG concept |
 | Board advantage change | ±0.02 per creature | Board presence correlates with winning |
 
-These shaping signals are recorded in trajectory files and used during imitation learning preprocessing to compute discounted return targets. However, **the PPO training loop currently zeros out intermediate shaping rewards**, relying purely on the terminal outcome (±1.0) and the value network's per-step assessments for credit assignment via GAE. The rationale: the value network already observes the full 37,216-float game state — including life totals, hand sizes, board counts, and combat math features — and learns their correlation with winning through discounted return targets. The crude shaping signals duplicate information the value network already models, and can actively contradict it on correct plays that sacrifice short-term metrics (e.g., sacrificing a creature to draw cards yields a negative board delta despite being a strong play). With the value network at low loss (0.032), GAE's per-step TD residuals ($\delta_t = \gamma V(s_{t+1}) - V(s_t)$) provide cleaner credit assignment than layering hand-coded deltas on top.
+These shaping signals are recorded in trajectory files and used during imitation learning preprocessing to compute discounted return targets. The PPO training loop supports an optional **decaying shaping coefficient** (`--reward-shaping-coeff`, default 0.0) that scales intermediate rewards before injecting them into GAE:
+
+$$r_t = \alpha \cdot r_t^{\text{intermediate}} + r_t^{\text{terminal}}$$
+
+where $\alpha = \alpha_0 \cdot d^{\text{round}}$ ($\alpha_0$ = initial coefficient, $d$ = per-round decay rate). With default values of $\alpha_0 = 1.0$ and $d = 0.95$, the shaping signal halves every ~14 rounds and becomes negligible by round 60.
+
+The rationale for optional/decaying shaping rather than permanent: the value network already observes the full 37,216-float game state — including life totals, hand sizes, board counts, and combat math features — and learns their correlation with winning. The crude delta signals duplicate information the value network already models, and can actively contradict it on correct plays that sacrifice short-term metrics (e.g., sacrificing a creature to draw cards yields a negative board delta despite being a strong play). However, the value network is weakest at turns 1-5 where prediction accuracy is only 73-80% (Section 5.4.6), so early-training shaping may bootstrap useful signal that the value network cannot yet provide. The decay ensures the model eventually optimizes for pure win rate.
+
+Note that the delta-based intermediate rewards are approximately potential-based: $r_t^{\text{intermediate}} = \Phi(s_{t+1}) - \Phi(s_t)$ where $\Phi(s) = 0.01 \cdot \text{lifeAdv} + 0.05 \cdot \text{cardAdv} + 0.02 \cdot \text{boardAdv}$. Potential-based shaping preserves the optimal policy (Ng et al., 1999), though the missing $\gamma$ factor ($\gamma\Phi(s') - \Phi(s)$ vs $\Phi(s') - \Phi(s)$) introduces a small bias that vanishes with the decay.
 
 #### 5.4.4 Full Autonomy
 
@@ -650,7 +662,59 @@ This does not necessarily mean PPO cannot work at our scale, but it suggests tha
 
 Weight drift analysis confirmed the policy was changing: priority head L2 drift 5.2→14.9, attack 3.3→9.0, value network 11.4→33.0 over rounds 5-40. The model found a gradient signal and moved weights consistently — but improvements didn't translate to wins because the frozen encoder was the ceiling.
 
-After implementing joint encoder training and PPO hyperparameter improvements (gamma 0.95→0.99, entropy 0.005→0.03, 800 games/round), the Blue Tempo deck was replaced with a simpler Mono Blue Tempest Djinn list (MTGGoldfish #1361608) which the heuristic can actually play (44% vs heuristic, up from 5-15%). PPO training with the jointly-trained encoder and improved hyperparameters is in progress.
+After implementing joint encoder training and PPO hyperparameter improvements (gamma 0.95→0.99, entropy 0.005→0.03, 800 games/round), the Blue Tempo deck was replaced with a simpler Mono Blue Tempest Djinn list (MTGGoldfish #1361608) which the heuristic can actually play (44% vs heuristic, up from 5-15%).
+
+#### 5.4.6 Expanded Imitation Training (2,000 Games) and PPO Analysis
+
+We retrained decision heads on a larger dataset of 2,000 games (22 epochs), producing `model_with_decisions.pt`. PPO was run for 9 rounds (400 games/round collection, 100 games eval) against the heuristic AI with the jointly-trained encoder unfrozen.
+
+**PPO progression (rounds 1-9):**
+
+| Round | Eval WR | Atk Rate | Spells/Turn | Idle Turns |
+|-------|---------|----------|-------------|------------|
+| 1 | 27% | 55% | 0.53 | 27% |
+| 2 | 36% | 66% | 0.55 | 28% |
+| 4 | 34% | 70% | 0.56 | 20% |
+| 9 | 27% | — | — | — |
+
+Best: 36% at round 2. Attack rate improved steadily (55% → 70%), idle turns decreased (27% → 20%), but win rate oscillated without sustained improvement.
+
+**Gameplay analysis.** Trajectory analysis of losses revealed two distinct failure modes:
+
+1. **Idle turns.** In losses, 29% of turns with castable spells saw nothing played (vs 9% in wins). The idle rate climbed from ~15% at turn 3 to 58% by turn 11, indicating the model progressively gives up mid-game.
+
+2. **Combat passivity.** In crowded board states (3+ creatures each side), the model attacked only 54% of the time in losses vs 96% in wins. Win rate by max board size showed a dip at 6-7 total creatures (18%) compared to 4-5 (28%), suggesting difficulty with complex combat math in aggro mirrors.
+
+**Value network prediction accuracy by turn:**
+
+| Turn | Accuracy | Avg Value (wins) | Avg Value (losses) | Separation |
+|------|----------|-------------------|---------------------|------------|
+| Mulligan | 75% | -0.35 | -0.44 | 0.09 |
+| T4 | 79% | -0.20 | -0.57 | 0.37 |
+| T7 | 83% | +0.08 | -0.65 | 0.73 |
+| T10 | 89% | +0.35 | -0.76 | 1.11 |
+
+The value network reaches useful discrimination (>80% accuracy, separation >0.7) only around turn 7. At turns 1-5 — where the most consequential deployment decisions happen — accuracy is 73-79% with separation under 0.4. This means GAE advantage estimates for early-game actions are noisy, contributing to the model's difficulty learning to curve out.
+
+A greedy (argmax) evaluation of the same model achieved 32% vs 27% under stochastic sampling, consistent with expected exploration cost.
+
+#### 5.4.7 League-Based PPO Training
+
+The skewed signal problem — 70% of collection games are losses, providing overwhelmingly negative advantage estimates — motivated a shift to league-based training. Rather than always playing against the heuristic AI (Elo ~1200), the model plays against a pool of opponents matched by Elo to produce ~50% win rate in collection.
+
+The training proceeds in phases:
+
+1. **Rounds 1-4:** Pure self-play (pool empty). Both players are the current model, guaranteeing 50/50 signal. The model can learn basic play patterns (deploy creatures, attack when ahead) from balanced outcomes.
+
+2. **Round 5+:** Snapshots saved to the pool. The model plays against weaker historical versions of itself, winning easily at first (building Elo), then facing progressively harder opponents as the pool grows.
+
+3. **Heuristic entry:** Once eval win rate vs heuristic reaches 35%, the heuristic AI enters the opponent pool as a fixed-Elo opponent. This provides a curriculum: the model first learns fundamentals from balanced self-play, then faces the structured play of the heuristic.
+
+Reward shaping (Section 5.4.3) is enabled with coefficient 1.0 decaying at 0.95/round, providing early bootstrap signal that fades as the value network improves.
+
+Eval remains strictly vs heuristic to maintain a consistent comparison metric. The gameplay metrics dashboard tracks attack rate, spells per turn, idle turn percentage, and heuristic fallback count per eval round, providing visibility into whether PPO is addressing the specific behavioral deficits identified in Section 5.4.6.
+
+Training with league play is in progress (2026-03-28).
 
 ---
 
@@ -676,7 +740,9 @@ Our approach aims to match and eventually exceed this performance through learne
 
 **Hidden information.** Our current feature encoding does not model uncertainty over the opponent's hidden hand. The model receives what a legal player would see (hand size, not contents), but has no explicit mechanism for probabilistic reasoning about hidden cards.
 
-**Computational scale.** Our single-GPU setup limits both model size and RL training throughput. PPO in complex game domains typically requires millions of games for meaningful policy improvement; our budget of ~5,000 games is 3-4 orders of magnitude below this. The progressive scaling plan targets 150M parameters, which approaches the practical limit of a 10GB GPU with mixed precision. More critically, the sample efficiency gap may require algorithmic changes (e.g., offline RL methods like AWR) rather than simply more compute.
+**Computational scale.** Our single-GPU setup limits both model size and RL training throughput. PPO in complex game domains typically requires millions of games for meaningful policy improvement; our budget of ~20,000 games across multiple PPO runs is 2-3 orders of magnitude below typical requirements. The progressive scaling plan targets 150M parameters, which approaches the practical limit of a 10GB GPU with mixed precision. League-based training improves sample efficiency by providing balanced signal (vs skewed 70% loss rate against the heuristic), but the fundamental compute gap remains.
+
+**Value network limitations.** The value network achieves only 73-79% accuracy at turns 1-5, with average value estimates for actual wins still negative through turn 6. This means GAE advantage estimates for early-game decisions — where curving out and deploying threats is most critical — carry substantial noise. Reward shaping provides a partial mitigation by injecting direct signal for board/card/life changes, but the fundamental tension between deck-dependent reward weights and strategy diversity remains unresolved.
 
 ### 6.3 Future Work
 
@@ -700,6 +766,8 @@ Key data quality improvements include game-level train/val splitting (preventing
 
 The key architectural insights are: (1) decomposing the MTG decision space into specialized heads — each with appropriate loss functions (softmax CE for single-select priority, BCE for multi-select combat, per-blocker CE for assignment) — is more tractable than a monolithic policy; (2) the transformer's set-attention mechanism naturally handles variable-size card collections; and (3) recording the full mechanically-legal candidate set (not just the heuristic's choice) gives the RL model visibility into creative plays the heuristic would never consider.
 
+Key findings from PPO training include: (1) the value network is the critical bottleneck — it must accurately assess game states at turns 1-5 for PPO to improve early-game play, but currently reaches useful accuracy only around turn 7; (2) playing against a fixed strong opponent (the heuristic) provides heavily skewed signal that makes improvement difficult — league-based training with Elo-matched opponents addresses this by ensuring ~50% win rate in collection games; (3) gameplay metrics (attack rate, idle turns, spells per turn) provide more actionable diagnostics than aggregate win rate alone.
+
 MTG represents a frontier challenge for game AI — a domain where the rules themselves are as complex as the strategies that emerge from them. Our system provides a foundation for exploring this frontier through learned, self-improving play.
 
 ---
@@ -715,6 +783,10 @@ Card-Forge Project. (2007-present). Forge: Magic: The Gathering game engine. htt
 Cowling, P. I., Ward, C. D., & Powley, E. J. (2012). Ensemble determinization in Monte Carlo tree search for the imperfect information card game Magic: The Gathering. *IEEE Transactions on Computational Intelligence and AI in Games*, 4(4), 267-277.
 
 Hoover, A. K., et al. (2020). Building a better Hearthstone agent using deep reinforcement learning. *IEEE Conference on Games*.
+
+Ng, A. Y., Harada, D., & Russell, S. (1999). Policy invariance under reward transformations: Theory and application to reward shaping. *Proceedings of the 16th International Conference on Machine Learning*, 278-287.
+
+Peng, X. B., Kumar, A., Zhang, G., & Levine, S. (2019). Advantage-weighted regression: Simple and scalable off-policy reinforcement learning. *arXiv preprint arXiv:1910.00177*.
 
 Santos, A., et al. (2017). Monte Carlo tree search experiments in Hearthstone. *IEEE Conference on Computational Intelligence and Games*.
 

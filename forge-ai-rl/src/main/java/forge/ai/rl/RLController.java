@@ -198,6 +198,10 @@ public class RLController {
         DecisionResult result = requestDecision(context);
         if (result == null) return List.of(0); // fallback: first target
         recordDecision(context, result);
+
+        Logger.info("RL_TARGET: n={} selected={} value={}", targets.size(),
+                result.getSelectedIndices(), String.format("%.3f", result.getValueEstimate()));
+
         return result.getSelectedIndices();
     }
 
@@ -229,16 +233,16 @@ public class RLController {
             throw new ModelServerException(
                     "Model server unavailable for attack decision");
         }
-        // Log model output for debugging
-        StringBuilder sb = new StringBuilder("RL_MODEL_ATTACK: probs=[");
         float[] probs = result.getActionProbabilities();
+        StringBuilder sb = new StringBuilder("RL_ATTACK: n=");
+        sb.append(possibleAttackers.size()).append(" selected=").append(result.getSelectedIndices());
+        sb.append(" probs=[");
         for (int i = 0; i < probs.length && i < possibleAttackers.size(); i++) {
-            if (i > 0) sb.append(", ");
+            if (i > 0) sb.append(",");
             sb.append(String.format("%.2f", probs[i]));
         }
-        sb.append("] selected=").append(result.getSelectedIndices());
-        sb.append(" value=").append(String.format("%.3f", result.getValueEstimate()));
-        System.out.println(sb.toString());
+        sb.append("] value=").append(String.format("%.3f", result.getValueEstimate()));
+        Logger.info(sb.toString());
         recordDecision(context, result);
         return result.getSelectedIndices();
     }
@@ -303,6 +307,13 @@ public class RLController {
                 assignments.add(pairIndices.get(idx));
             }
         }
+
+        StringBuilder sb = new StringBuilder("RL_BLOCK: blockers=");
+        sb.append(possibleBlockers.size()).append(" attackers=").append(attackers.size());
+        sb.append(" assignments=").append(assignments.size());
+        sb.append(" value=").append(String.format("%.3f", result.getValueEstimate()));
+        Logger.info(sb.toString());
+
         return assignments;
     }
 

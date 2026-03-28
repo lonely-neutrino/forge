@@ -123,4 +123,9 @@ echo ""
     --threads 32 \
     --servers 4 \
     --java-procs 4 \
+    --reward-shaping-coeff 1.0 \
+    --reward-shaping-decay 0.95 \
+    --league \
+    --snapshot-interval 5 \
+    --max-opponents 3 \
     "${DECK_ARGS[@]}"

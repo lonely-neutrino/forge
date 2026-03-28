@@ -79,6 +79,22 @@ class PPOState:
     current_elo: float = 1000.0
     eval_interval: int = 5
 
+    # Gameplay metrics (from eval trajectories)
+    attack_rate: float = 0.0         # % of candidates that attacked
+    attack_all_in_pct: float = 0.0   # % of phases where all creatures attacked
+    attack_hold_pct: float = 0.0     # % of phases where no creatures attacked
+    spells_per_turn: float = 0.0     # avg spells cast per turn
+    spells_per_game: float = 0.0     # avg spells cast per game
+    avg_turns: float = 0.0           # avg game length in turns
+    idle_turns_pct: float = 0.0      # % of turns with no spells when possible
+    targeting_issues: int = 0        # fallback decisions in eval
+    spell_type_counts: dict = field(default_factory=dict)
+
+    # History for charts
+    attack_rates: List[float] = field(default_factory=list)
+    spells_per_turns: List[float] = field(default_factory=list)
+    idle_turns_pcts: List[float] = field(default_factory=list)
+
     # Console log
     log_lines: List[str] = field(default_factory=list)
     log_dirty: bool = False
@@ -90,12 +106,262 @@ def update_elo(rating, opponent_rating, score, k=32):
     return rating + k * (score - expected)
 
 
+class LeagueManager:
+    """Manages opponent pool and Elo-based matchmaking."""
+
+    def __init__(self, checkpoint_dir, snapshot_interval=5,
+                 max_snapshots=15, temperature=200.0):
+        self.checkpoint_dir = checkpoint_dir
+        self.snapshot_interval = snapshot_interval
+        self.max_snapshots = max_snapshots
+        self.temperature = temperature
+        self.snapshots = []  # [{path, elo, round}]
+        self.current_elo = 1000.0
+        self.heuristic_elo = 1200.0
+        self.heuristic_in_pool = False
+
+    def save_snapshot(self, model, round_num):
+        """Save current model as an opponent snapshot."""
+        path = os.path.join(
+            self.checkpoint_dir,
+            f'league_snapshot_r{round_num}.pt')
+        model.save(path)
+        self.snapshots.append({
+            'path': path,
+            'elo': self.current_elo,
+            'round': round_num,
+        })
+        # Prune if too many — remove lowest Elo
+        if len(self.snapshots) > self.max_snapshots:
+            self.snapshots.sort(key=lambda s: s['elo'])
+            removed = self.snapshots.pop(0)
+            try:
+                os.remove(removed['path'])
+            except OSError:
+                pass
+        return path
+
+    def should_add_heuristic(self, eval_win_rate):
+        """Add heuristic to pool once model is strong enough."""
+        if not self.heuristic_in_pool and eval_win_rate >= 0.35:
+            self.heuristic_in_pool = True
+            return True
+        return False
+
+    def select_opponents(self, n_games, max_opponents=3):
+        """Select opponents weighted by Elo proximity.
+        Returns: [(opponent_info, n_games_allocated)]
+        opponent_info is either a snapshot dict or 'heuristic'.
+        """
+        import math
+
+        candidates = list(self.snapshots)
+        if self.heuristic_in_pool:
+            candidates.append({
+                'path': 'heuristic',
+                'elo': self.heuristic_elo,
+                'round': -1,
+            })
+
+        if not candidates:
+            # No opponents yet — selfplay
+            return [('selfplay', n_games)]
+
+        # Weight by Elo proximity
+        weights = []
+        for c in candidates:
+            diff = abs(c['elo'] - self.current_elo)
+            w = math.exp(-diff / self.temperature)
+            weights.append(w)
+
+        total_w = sum(weights)
+        if total_w == 0:
+            weights = [1.0] * len(candidates)
+            total_w = len(candidates)
+
+        # Normalize and select top opponents
+        scored = sorted(zip(candidates, weights),
+                        key=lambda x: -x[1])
+        selected = scored[:max_opponents]
+
+        # Allocate games proportionally
+        sel_total = sum(w for _, w in selected)
+        result = []
+        allocated = 0
+        for i, (cand, w) in enumerate(selected):
+            if i == len(selected) - 1:
+                games = n_games - allocated
+            else:
+                games = max(10, int(n_games * w / sel_total))
+            allocated += games
+            result.append((cand, games))
+
+        return result
+
+    def update_elo_from_result(self, opponent_elo, wins,
+                               losses, k=16):
+        """Update current model Elo from game results."""
+        for _ in range(wins):
+            self.current_elo = update_elo(
+                self.current_elo, opponent_elo, 1.0, k)
+        for _ in range(losses):
+            self.current_elo = update_elo(
+                self.current_elo, opponent_elo, 0.0, k)
+
+    def update_opponent_elo(self, opp_path, wins_against,
+                            losses_against, k=16):
+        """Update a snapshot's Elo based on results."""
+        for snap in self.snapshots:
+            if snap['path'] == opp_path:
+                for _ in range(losses_against):
+                    snap['elo'] = update_elo(
+                        snap['elo'], self.current_elo,
+                        1.0, k)
+                for _ in range(wins_against):
+                    snap['elo'] = update_elo(
+                        snap['elo'], self.current_elo,
+                        0.0, k)
+                break
+
+    def to_dict(self):
+        return {
+            'snapshots': self.snapshots,
+            'current_elo': self.current_elo,
+            'heuristic_elo': self.heuristic_elo,
+            'heuristic_in_pool': self.heuristic_in_pool,
+        }
+
+    def from_dict(self, d):
+        self.snapshots = d.get('snapshots', [])
+        self.current_elo = d.get('current_elo', 1000.0)
+        self.heuristic_elo = d.get('heuristic_elo', 1200.0)
+        self.heuristic_in_pool = d.get(
+            'heuristic_in_pool', False)
+
+
 def log(state, msg):
     print(msg, flush=True)
     state.log_lines.append(msg)
     if len(state.log_lines) > 300:
         state.log_lines = state.log_lines[-300:]
     state.log_dirty = True
+
+
+# ── Trajectory analysis (gameplay metrics) ───
+
+TYPE_NAMES = ['Creature', 'Instant', 'Sorcery', 'Enchantment',
+              'Artifact', 'Planeswalker', 'Land']
+
+
+def analyze_eval_trajectories(traj_dir, state):
+    """Analyze eval trajectory JSONL files and update state with gameplay metrics."""
+    import json
+    from collections import defaultdict
+    from pathlib import Path
+
+    files = sorted(Path(traj_dir).glob('traj_*.jsonl'))
+    if not files:
+        return
+
+    attack_all = attack_partial = attack_none = 0
+    attackers_total = candidates_total = 0
+    total_fallback = total_decisions = 0
+    game_spells = []
+    game_turns = []
+    type_counts = defaultdict(int)
+    turns_with_options = 0   # turns where a spell could have been played
+    turns_with_no_spell = 0  # turns where we had options but played nothing
+
+    for fpath in files:
+        with open(fpath) as fh:
+            lines = fh.readlines()
+        if not lines:
+            continue
+
+        g_spells_by_turn = defaultdict(int)
+        g_options_by_turn = defaultdict(bool)
+        max_turn = 0
+
+        for line in lines[1:]:
+            try:
+                rec = json.loads(line)
+            except Exception:
+                continue
+            total_decisions += 1
+            if rec.get('usedFallback', False):
+                total_fallback += 1
+
+            gf = rec.get('globalFeatures', [])
+            game_turn = int(round(gf[4] * 30)) if len(gf) > 4 else 0
+            max_turn = max(max_turn, game_turn)
+            dt = rec.get('decisionType', '')
+
+            if dt == 'PRIORITY_ACTION':
+                cands = rec.get('candidateFeatures', [])
+                sel = rec.get('selectedIndices', [])
+                # Mark that this turn had spell options
+                # (exclude pass-only situations: 1 candidate = pass only)
+                if len(cands) > 1:
+                    g_options_by_turn[game_turn] = True
+                if sel and sel[0] < len(cands):
+                    chosen = cands[sel[0]]
+                    card_type = None
+                    for ti in range(min(7, len(chosen))):
+                        if chosen[ti] > 0.5:
+                            card_type = TYPE_NAMES[ti]
+                            break
+                    if card_type and card_type != 'Land':
+                        g_spells_by_turn[game_turn] += 1
+                        type_counts[card_type] += 1
+
+            elif dt == 'DECLARE_ATTACKERS':
+                sel = rec.get('selectedIndices', [])
+                cands = rec.get('candidateFeatures', [])
+                n_sel, n_cand = len(sel), len(cands)
+                attackers_total += n_sel
+                candidates_total += n_cand
+                if n_sel == 0:
+                    attack_none += 1
+                elif n_sel == n_cand:
+                    attack_all += 1
+                else:
+                    attack_partial += 1
+
+        game_spells.append(sum(g_spells_by_turn.values()))
+        game_turns.append(max_turn)
+        for t, had_options in g_options_by_turn.items():
+            if had_options:
+                turns_with_options += 1
+                if g_spells_by_turn.get(t, 0) == 0:
+                    turns_with_no_spell += 1
+
+    n = len(files)
+    if n == 0:
+        return
+
+    total_atk = attack_all + attack_partial + attack_none
+    avg_spells = sum(game_spells) / n
+    avg_turns_val = sum(game_turns) / n if game_turns else 0
+
+    state.attack_rate = (attackers_total / candidates_total * 100
+                         if candidates_total > 0 else 0)
+    state.attack_all_in_pct = (attack_all / total_atk * 100
+                                if total_atk > 0 else 0)
+    state.attack_hold_pct = (attack_none / total_atk * 100
+                              if total_atk > 0 else 0)
+    state.spells_per_game = avg_spells
+    state.avg_turns = avg_turns_val
+    state.spells_per_turn = (avg_spells / avg_turns_val
+                              if avg_turns_val > 0 else 0)
+    state.idle_turns_pct = (turns_with_no_spell / turns_with_options * 100
+                             if turns_with_options > 0 else 0)
+    state.targeting_issues = total_fallback
+    state.spell_type_counts = dict(type_counts)
+
+    # Append to history for charting
+    state.attack_rates.append(state.attack_rate)
+    state.spells_per_turns.append(state.spells_per_turn)
+    state.idle_turns_pcts.append(state.idle_turns_pct)
 
 
 # ── PPO training thread (delegates to ppo_trainer) ───
@@ -108,7 +374,8 @@ def ppo_thread(state, args):
             compute_ppo_priority_batch,
             compute_ppo_target_batch,
             compute_ppo_mulligan_batch,
-            run_games, start_model_server,
+            run_games, run_league_games,
+            start_model_server,
             find_free_port,
             ModelServerError, PROJECT_ROOT)
         from training.deck_config import load_rl_decks
@@ -200,6 +467,21 @@ def ppo_thread(state, args):
                     'elo_ratings', [])
                 state.current_elo = saved.get(
                     'current_elo', 1000.0)
+                state.attack_rates = saved.get(
+                    'attack_rates', [])
+                state.spells_per_turns = saved.get(
+                    'spells_per_turns', [])
+                state.idle_turns_pcts = saved.get(
+                    'idle_turns_pcts', [])
+                # Restore reward shaping coefficient
+                saved_coeff = saved.get(
+                    'reward_shaping_coeff', None)
+                if saved_coeff is not None:
+                    args.reward_shaping_coeff = saved_coeff
+                # Restore league state
+                if 'league' in saved and use_league \
+                        and league is not None:
+                    league.from_dict(saved['league'])
                 log(state,
                     f"Resumed from round {start_round}, "
                     f"best WR: "
@@ -226,6 +508,25 @@ def ppo_thread(state, args):
         eval_dir = traj_dir + '_eval'
         os.makedirs(save_dir, exist_ok=True)
 
+        shaping_coeff = getattr(
+            args, 'reward_shaping_coeff', 0.0)
+        shaping_decay = getattr(
+            args, 'reward_shaping_decay', 0.95)
+        if shaping_coeff > 0:
+            log(state, f"Reward shaping: coeff={shaping_coeff}, "
+                f"decay={shaping_decay}/round")
+
+        # League play setup
+        use_league = getattr(args, 'league', False)
+        league = None
+        if use_league:
+            league = LeagueManager(
+                save_dir,
+                snapshot_interval=getattr(
+                    args, 'snapshot_interval', 5),
+                max_snapshots=15)
+            log(state, "League play ENABLED")
+
         start_time = time.time()
 
         total_rounds = start_round + args.rounds
@@ -239,16 +540,7 @@ def ppo_thread(state, args):
             collect_mode = getattr(args, 'collect_mode',
                                    'evaluate')
             state.training_mode = collect_mode
-            mode_label = ('self-play' if collect_mode
-                         == 'selfplay' else 'vs heuristic')
             state.phase = "collecting"
-            state.status = (
-                f"Round {rnd}: collecting "
-                f"{args.games_per_round} games "
-                f"({mode_label})...")
-            log(state, f"\n--- Round {rnd}/{total_rounds} "
-                f"({mode_label}) ---")
-            log(state, "  Collecting games...")
 
             def on_progress(done, total):
                 state.games_this_round = done
@@ -263,6 +555,182 @@ def ppo_thread(state, args):
             def on_java_log(line):
                 log(state, f"  [java] {line}")
 
+            # Clean trajectories before collection
+            from pathlib import Path as _Path
+            for _f in _Path(traj_dir).glob('traj_*.jsonl'):
+                _f.unlink()
+
+            if use_league and league is not None:
+                # League collection
+                opponents = league.select_opponents(
+                    args.games_per_round,
+                    max_opponents=getattr(
+                        args, 'max_opponents', 3))
+                opp_labels = []
+                for opp_info, opp_games in opponents:
+                    if opp_info == 'selfplay':
+                        opp_labels.append(
+                            f"selfplay({opp_games}g)")
+                    elif opp_info['path'] == 'heuristic':
+                        opp_labels.append(
+                            f"heuristic(Elo {opp_info['elo']:.0f}, {opp_games}g)")
+                    else:
+                        opp_labels.append(
+                            f"r{opp_info['round']}(Elo {opp_info['elo']:.0f}, {opp_games}g)")
+                mode_label = "league: " + ", ".join(
+                    opp_labels)
+                state.status = (
+                    f"Round {rnd}: collecting "
+                    f"{args.games_per_round} games "
+                    f"(league)...")
+                log(state,
+                    f"\n--- Round {rnd}/{total_rounds} "
+                    f"(league) ---")
+                log(state,
+                    f"  Opponents: {', '.join(opp_labels)}")
+                log(state, "  Collecting games...")
+
+                collect_ok = True
+                for opp_info, opp_games in opponents:
+                    if opp_info == 'selfplay':
+                        # Both players use current model
+                        try:
+                            _, _ = run_games(
+                                opp_games, traj_dir,
+                                mode='selfplay',
+                                port=port_arg,
+                                progress_callback=
+                                    on_progress,
+                                threads=args.threads,
+                                java_procs=args.java_procs,
+                                log_callback=on_java_log)
+                        except ModelServerError as e:
+                            log(state, f"  FATAL: {e}")
+                            collect_ok = False
+                            break
+                    elif opp_info['path'] == 'heuristic':
+                        # Current model vs heuristic
+                        try:
+                            wr, _ = run_games(
+                                opp_games, traj_dir,
+                                mode='evaluate',
+                                port=port_arg,
+                                progress_callback=
+                                    on_progress,
+                                threads=args.threads,
+                                java_procs=args.java_procs,
+                                log_callback=on_java_log)
+                            wins = int((wr or 0) * opp_games)
+                            league.update_elo_from_result(
+                                league.heuristic_elo,
+                                wins, opp_games - wins)
+                        except ModelServerError as e:
+                            log(state, f"  FATAL: {e}")
+                            collect_ok = False
+                            break
+                    else:
+                        # Current model vs snapshot
+                        try:
+                            opp_model = MTGModel.load(
+                                opp_info['path'],
+                                device=device)
+                            opp_model.eval()
+                            opp_ports = []
+                            opp_servers = []
+                            for _ in range(2):
+                                op = find_free_port()
+                                osrv = start_model_server(
+                                    opp_model, device, op)
+                                opp_ports.append(op)
+                                opp_servers.append(osrv)
+
+                            wr, _ = run_league_games(
+                                opp_games, traj_dir,
+                                current_ports=ports,
+                                opponent_ports=opp_ports,
+                                threads=args.threads,
+                                progress_callback=
+                                    on_progress,
+                                log_callback=on_java_log)
+                            wins = int(
+                                (wr or 0) * opp_games)
+                            losses = opp_games - wins
+                            league.update_elo_from_result(
+                                opp_info['elo'],
+                                wins, losses)
+                            league.update_opponent_elo(
+                                opp_info['path'],
+                                wins, losses)
+                            log(state,
+                                f"  vs r{opp_info['round']}"
+                                f": {wr:.1%} "
+                                f"({wins}/{opp_games})")
+                        except ModelServerError as e:
+                            log(state, f"  FATAL: {e}")
+                            collect_ok = False
+                            break
+                        except Exception as e:
+                            log(state,
+                                f"  Opponent load error: "
+                                f"{e}")
+                            continue
+                        finally:
+                            # Clean up opponent servers
+                            del opp_model
+                            import gc; gc.collect()
+
+                if not collect_ok:
+                    log(state,
+                        "  Stopping PPO — server down.")
+                    state.status = (
+                        "ABORTED: model server down")
+                    state.phase = "done"
+                    break
+
+                # Save snapshot at interval
+                if rnd % league.snapshot_interval == 0:
+                    snap_path = league.save_snapshot(
+                        model, rnd)
+                    log(state,
+                        f"  Saved league snapshot: "
+                        f"{os.path.basename(snap_path)} "
+                        f"(Elo {league.current_elo:.0f})")
+
+                log(state,
+                    f"  League Elo: "
+                    f"{league.current_elo:.0f}")
+            else:
+                # Standard collection (no league)
+                mode_label = ('self-play' if collect_mode
+                             == 'selfplay'
+                             else 'vs heuristic')
+                state.status = (
+                    f"Round {rnd}: collecting "
+                    f"{args.games_per_round} games "
+                    f"({mode_label})...")
+                log(state,
+                    f"\n--- Round {rnd}/{total_rounds} "
+                    f"({mode_label}) ---")
+                log(state, "  Collecting games...")
+
+                try:
+                    _, stdout = run_games(
+                        args.games_per_round, traj_dir,
+                        mode=collect_mode,
+                        port=port_arg,
+                        progress_callback=on_progress,
+                        threads=args.threads,
+                        java_procs=args.java_procs,
+                        log_callback=on_java_log)
+                except ModelServerError as e:
+                    log(state, f"  FATAL: {e}")
+                    log(state,
+                        "  Stopping PPO — model server "
+                        "is down.")
+                    state.status = (
+                        "ABORTED: model server down")
+                    state.phase = "done"
+                    break
             try:
                 _, stdout = run_games(
                     args.games_per_round, traj_dir,
@@ -282,7 +750,8 @@ def ppo_thread(state, args):
 
             attack_data, block_data, priority_data, \
                 target_data, mulligan_data, \
-                value_data = load_ppo_data(traj_dir)
+                value_data = load_ppo_data(traj_dir,
+                    shaping_coeff=shaping_coeff)
             state.attacks_this_round = len(attack_data)
             state.blocks_this_round = len(block_data)
             log(state,
@@ -574,6 +1043,13 @@ def ppo_thread(state, args):
             avg_vl = total_vl / max(n_updates, 1)
             avg_ent = total_ent / max(n_updates, 1)
 
+            # Decay reward shaping
+            if shaping_coeff > 0:
+                shaping_coeff *= shaping_decay
+                log(state,
+                    f"  Reward shaping coeff: "
+                    f"{shaping_coeff:.4f}")
+
             # Free trajectory data before launching eval/next round
             del attack_data, block_data, priority_data
             del target_data, mulligan_data, value_data
@@ -626,6 +1102,24 @@ def ppo_thread(state, args):
                                      0.0, k=16)
                 state.current_elo = elo
                 state.elo_ratings.append(elo)
+
+                # Analyze eval gameplay metrics
+                try:
+                    analyze_eval_trajectories(eval_dir, state)
+                    types_str = ' '.join(
+                        f"{k}={v}" for k, v in sorted(
+                            state.spell_type_counts.items(),
+                            key=lambda x: -x[1]))
+                    log(state,
+                        f"  Gameplay: atk_rate={state.attack_rate:.0f}% "
+                        f"all-in={state.attack_all_in_pct:.0f}% "
+                        f"hold={state.attack_hold_pct:.0f}% "
+                        f"spells/turn={state.spells_per_turn:.2f} "
+                        f"idle={state.idle_turns_pct:.0f}% "
+                        f"fallbacks={state.targeting_issues}")
+                    log(state, f"  Types: {types_str}")
+                except Exception as e:
+                    log(state, f"  (gameplay analysis failed: {e})")
             else:
                 next_eval = (rnd + eval_interval
                     - rnd % eval_interval)
@@ -634,6 +1128,12 @@ def ppo_thread(state, args):
 
             # Update state
             state.current_win_rate = eval_wr
+            # Check if heuristic should enter league
+            if league and league.should_add_heuristic(
+                    eval_wr):
+                log(state,
+                    f"  Heuristic added to league pool "
+                    f"(eval WR {eval_wr:.1%} >= 35%)")
             state.current_policy_loss = avg_pl
             state.current_value_loss = avg_vl
             state.current_entropy = avg_ent
@@ -665,6 +1165,12 @@ def ppo_thread(state, args):
                 'elo_ratings': state.elo_ratings,
                 'current_elo': state.current_elo,
                 'collect_mode': collect_mode,
+                'attack_rates': state.attack_rates,
+                'spells_per_turns': state.spells_per_turns,
+                'idle_turns_pcts': state.idle_turns_pcts,
+                'reward_shaping_coeff': shaping_coeff,
+                'league': league.to_dict()
+                    if league else None,
             }
             with open(os.path.join(
                     save_dir,
@@ -715,7 +1221,7 @@ class PPODashboard:
         self.root = root
         self.state = state
         root.title("MTG RL — PPO Self-Play Training")
-        root.geometry("950x750")
+        root.geometry("1050x800")
         root.configure(bg='#1e1e2e')
 
         style = ttk.Style()
@@ -767,6 +1273,8 @@ class PPODashboard:
             ('Best WR', '—'), ('Elo', '—'),
             ('Policy Loss', '—'), ('Entropy', '—'),
             ('Round Time', '—'), ('ETA', '—'),
+            ('Atk Rate', '—'), ('Spells/Turn', '—'),
+            ('Idle Turns', '—'), ('Fallbacks', '—'),
         ]):
             r, c = divmod(i, 4)
             ttk.Label(sf, text=f"{k}:",
@@ -785,14 +1293,36 @@ class PPODashboard:
             cf.pack(fill=tk.BOTH, expand=True, pady=4)
             self.fig = Figure(figsize=(9, 4), dpi=100,
                 facecolor='#1e1e2e')
-            self.ax_wr = self.fig.add_subplot(121)
-            self.ax_loss = self.fig.add_subplot(122)
-            for ax in [self.ax_wr, self.ax_loss]:
+            self.ax_wr = self.fig.add_subplot(131)
+            self.ax_loss = self.fig.add_subplot(132)
+            self.ax_gp = self.fig.add_subplot(133)
+            for ax, title in [
+                (self.ax_wr, 'Win Rate vs Heuristic'),
+                (self.ax_loss, 'Training Losses'),
+                (self.ax_gp, 'Gameplay Metrics'),
+            ]:
                 ax.set_facecolor('#313244')
+                ax.set_title(title, color='#cdd6f4',
+                    fontsize=10)
                 ax.tick_params(colors='#6c7086',
                     labelsize=8)
                 for sp in ax.spines.values():
                     sp.set_color('#45475a')
+            self.ax_wr.set_ylabel('Win Rate',
+                color='#a6adc8', fontsize=9)
+            self.ax_loss.set_ylabel('Loss',
+                color='#a6adc8', fontsize=9)
+            self.ax_gp.set_ylabel('Percent',
+                color='#a6adc8', fontsize=8)
+            self.ax_gp2 = self.ax_gp.twinx()
+            self.ax_gp2.set_ylabel('Spells/Turn',
+                color='#a6e3a1', fontsize=8)
+            self.ax_gp2.tick_params(colors='#6c7086',
+                labelsize=7)
+            self.ax_gp2.spines['right'].set_color('#45475a')
+            for ax in [self.ax_wr, self.ax_loss, self.ax_gp]:
+                ax.set_xlabel('Round',
+                    color='#a6adc8', fontsize=9)
             self.fig.tight_layout(pad=2)
             self.canvas = FigureCanvasTkAgg(
                 self.fig, master=cf)
@@ -846,6 +1376,17 @@ class PPODashboard:
             f"{s.round_time:.0f}s")
         self.svars['ETA'].set(
             f"{s.eta:.0f}s" if s.eta > 0 else "—")
+        self.svars['Atk Rate'].set(
+            f"{s.attack_rate:.0f}% "
+            f"(all={s.attack_all_in_pct:.0f}% "
+            f"hold={s.attack_hold_pct:.0f}%)")
+        self.svars['Spells/Turn'].set(
+            f"{s.spells_per_turn:.2f} "
+            f"({s.spells_per_game:.1f}/game)")
+        self.svars['Idle Turns'].set(
+            f"{s.idle_turns_pct:.0f}%")
+        self.svars['Fallbacks'].set(
+            f"{s.targeting_issues}")
 
         if HAS_MPL and s.chart_dirty and s.win_rates:
             s.chart_dirty = False
@@ -894,6 +1435,43 @@ class PPODashboard:
             self.ax_loss.tick_params(colors='#6c7086',
                 labelsize=8)
             for sp in self.ax_loss.spines.values():
+                sp.set_color('#45475a')
+
+            self.ax_gp.clear()
+            self.ax_gp2.clear()
+            self.ax_gp.set_facecolor('#313244')
+            self.ax_gp.set_title('Gameplay Metrics',
+                color='#cdd6f4', fontsize=10)
+            if s.attack_rates:
+                gr = range(1, len(s.attack_rates) + 1)
+                self.ax_gp.plot(gr, s.attack_rates,
+                    color='#f9e2af', linewidth=1.5,
+                    label='Atk Rate %', marker='o',
+                    markersize=3)
+                self.ax_gp.plot(gr, s.idle_turns_pcts,
+                    color='#f38ba8', linewidth=1.5,
+                    label='Idle Turns %', marker='s',
+                    markersize=3)
+                self.ax_gp2.plot(gr, s.spells_per_turns,
+                    color='#a6e3a1', linewidth=1.5,
+                    label='Spells/Turn', marker='^',
+                    markersize=3)
+            self.ax_gp.set_ylabel('Percent',
+                color='#a6adc8', fontsize=8)
+            self.ax_gp.set_xlabel('Round',
+                color='#a6adc8', fontsize=9)
+            self.ax_gp2.set_ylabel('Spells/Turn',
+                color='#a6e3a1', fontsize=8)
+            self.ax_gp2.tick_params(colors='#6c7086',
+                labelsize=7)
+            self.ax_gp2.spines['right'].set_color('#45475a')
+            self.ax_gp.legend(fontsize=7, loc='upper left',
+                facecolor='#313244',
+                edgecolor='#45475a',
+                labelcolor='#cdd6f4')
+            self.ax_gp.tick_params(colors='#6c7086',
+                labelsize=8)
+            for sp in self.ax_gp.spines.values():
                 sp.set_color('#45475a')
 
             self.fig.tight_layout(pad=2)
@@ -946,6 +1524,23 @@ def main():
         default=1,
         help='Eval vs heuristic every N rounds '
              '(selfplay mode, default: 1)')
+    parser.add_argument('--reward-shaping-coeff',
+        type=float, default=0.0,
+        help='Initial coefficient for intermediate '
+             'reward shaping (0=disabled)')
+    parser.add_argument('--reward-shaping-decay',
+        type=float, default=0.95,
+        help='Per-round multiplicative decay for '
+             'shaping coefficient')
+    parser.add_argument('--league',
+        action='store_true', default=False,
+        help='Enable league-based opponent selection')
+    parser.add_argument('--snapshot-interval',
+        type=int, default=5,
+        help='Save league snapshot every N rounds')
+    parser.add_argument('--max-opponents',
+        type=int, default=3,
+        help='Max opponents per collection round')
     parser.add_argument('--deck', action='append',
         help='Override the configured RL deck list '
              '(may be repeated)')

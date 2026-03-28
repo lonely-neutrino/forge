@@ -139,6 +139,19 @@ public class SimulateRLTraining {
         String onnxDir1 = params.containsKey("m1") ? params.get("m1").get(0) : null;
         String onnxDir2 = params.containsKey("m2") ? params.get("m2").get(0) : null;
 
+        // Parse port2 for league play (opponent ports)
+        int[] grpcPorts2;
+        if (params.containsKey("port2")) {
+            String portStr2 = params.get("port2").get(0);
+            String[] portParts2 = portStr2.split(",");
+            grpcPorts2 = new int[portParts2.length];
+            for (int pi = 0; pi < portParts2.length; pi++) {
+                grpcPorts2[pi] = Integer.parseInt(portParts2[pi].trim());
+            }
+        } else {
+            grpcPorts2 = grpcPorts; // default: same as player 1
+        }
+
         switch (mode) {
             case "collect":
                 runCollectionMode(decks, nGames, timeout, outputDir, quiet, threads);
@@ -148,6 +161,9 @@ public class SimulateRLTraining {
                 break;
             case "selfplay":
                 runSelfPlayMode(decks, nGames, timeout, outputDir, quiet, grpcHost, grpcPorts, threads);
+                break;
+            case "leagueplay":
+                runLeaguePlayMode(decks, nGames, timeout, outputDir, quiet, grpcHost, grpcPorts, grpcPorts2, threads);
                 break;
             case "headtohead":
                 if (onnxDir1 == null || onnxDir2 == null) {
@@ -470,6 +486,115 @@ public class SimulateRLTraining {
         System.out.printf("Self-play complete: %d games, %d server errors%n",
                 completed.get(), serverErrors.get());
         System.out.println("Trajectories saved to: " + outputDir);
+    }
+
+    /**
+     * League play mode: current model (port) vs opponent model (port2).
+     * Records trajectories for the current model (player 1) only.
+     * Usage: rltrain leagueplay -d deck1.dck -d deck2.dck -n 100 -port 50051 -port2 50052
+     */
+    private static void runLeaguePlayMode(List<Deck> decks, int nGames, int timeout,
+                                           String outputDir, boolean quiet,
+                                           String grpcHost, int[] currentPorts, int[] opponentPorts,
+                                           int threads) {
+        System.out.println("=== League Play Mode (" + threads + " threads, "
+                + currentPorts.length + " current server(s), "
+                + opponentPorts.length + " opponent server(s)) ===");
+
+        AtomicInteger currentWins = new AtomicInteger(0);
+        AtomicInteger opponentWins = new AtomicInteger(0);
+        AtomicInteger draws = new AtomicInteger(0);
+        AtomicInteger completed = new AtomicInteger(0);
+        AtomicInteger serverErrors = new AtomicInteger(0);
+        AtomicInteger consecutiveErrors = new AtomicInteger(0);
+        final int MAX_SERVER_ERRORS = 3;
+        long startTime = System.currentTimeMillis();
+
+        java.util.concurrent.ExecutorService executor =
+                java.util.concurrent.Executors.newFixedThreadPool(threads);
+        List<java.util.concurrent.Future<?>> futures = new ArrayList<>();
+
+        java.util.Random deckRng = new java.util.Random();
+        for (int i = 0; i < nGames; i++) {
+            final int gameIdx = i;
+            final int curPort = currentPorts[i % currentPorts.length];
+            final int oppPort = opponentPorts[i % opponentPorts.length];
+            final Deck deck1 = decks.get(deckRng.nextInt(decks.size()));
+            final Deck deck2 = decks.get(deckRng.nextInt(decks.size()));
+            final boolean currentFirst = (i % 2 == 0);
+
+            futures.add(executor.submit(() -> {
+                // Current model — record trajectories
+                RLConfig currentConfig = new RLConfig();
+                currentConfig.setMode(RLModelMode.GRPC);
+                currentConfig.setGrpcHost(grpcHost);
+                currentConfig.setGrpcPort(curPort);
+                currentConfig.setRecordTrajectories(true);
+                currentConfig.setTrajectoryOutputDir(outputDir);
+
+                // Opponent model — no trajectory recording
+                RLConfig opponentConfig = new RLConfig();
+                opponentConfig.setMode(RLModelMode.GRPC);
+                opponentConfig.setGrpcHost(grpcHost);
+                opponentConfig.setGrpcPort(oppPort);
+                opponentConfig.setRecordTrajectories(false);
+
+                try {
+                    GameResult result;
+                    if (currentFirst) {
+                        result = runSingleGame(deck1, deck2, currentConfig, opponentConfig,
+                                "Current_" + gameIdx, "Opponent_" + gameIdx, timeout, true);
+                    } else {
+                        result = runSingleGame(deck2, deck1, opponentConfig, currentConfig,
+                                "Opponent_" + gameIdx, "Current_" + gameIdx, timeout, true);
+                    }
+
+                    consecutiveErrors.set(0);
+
+                    if (result.isDraw) {
+                        draws.incrementAndGet();
+                    } else {
+                        boolean currentWon = currentFirst ? result.player1Won : !result.player1Won;
+                        if (currentWon) currentWins.incrementAndGet();
+                        else opponentWins.incrementAndGet();
+                    }
+                } catch (ModelServerException e) {
+                    serverErrors.incrementAndGet();
+                    int consec = consecutiveErrors.incrementAndGet();
+                    System.out.printf("Game %d MODEL_SERVER_ERROR (%d/%d): %s%n",
+                            gameIdx, consec, MAX_SERVER_ERRORS, e.getMessage());
+                } catch (Exception e) {
+                    System.out.printf("Game %d FAILED: %s%n", gameIdx, e.getMessage());
+                }
+
+                int done = completed.incrementAndGet();
+                if (!quiet && (done % 10 == 0 || done == nGames)) {
+                    int total = currentWins.get() + opponentWins.get();
+                    double winRate = total > 0 ? (double) currentWins.get() / total : 0;
+                    long elapsed = System.currentTimeMillis() - startTime;
+                    double gps = done * 1000.0 / elapsed;
+                    System.out.printf("Game %d/%d: current win rate: %.1f%% (%d/%d) [%.1f games/s]%n",
+                            done, nGames, winRate * 100, currentWins.get(), total, gps);
+                    System.out.flush();
+                }
+            }));
+        }
+
+        for (java.util.concurrent.Future<?> f : futures) {
+            try {
+                f.get(timeout + 30, TimeUnit.SECONDS);
+            } catch (TimeoutException e) {
+                f.cancel(true);
+            } catch (Exception e) {
+                // ignore
+            }
+        }
+        executor.shutdown();
+
+        int totalDecisive = currentWins.get() + opponentWins.get();
+        double winRate = totalDecisive > 0 ? (double) currentWins.get() / totalDecisive : 0;
+        System.out.printf("League play complete: %d games, current win rate: %.1f%%, server errors: %d%n",
+                completed.get(), winRate * 100, serverErrors.get());
     }
 
     /**
