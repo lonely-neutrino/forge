@@ -1017,6 +1017,84 @@ def run_games(n_games, traj_dir, mode='evaluate',
         n_games, traj_dir, mode, port, quiet,
         progress_callback, log_callback, threads, decks)
 
+def run_league_games(n_games, traj_dir, current_ports,
+                     opponent_ports, threads=16,
+                     progress_callback=None,
+                     log_callback=None,
+                     clean_traj=False):
+    """Run league play games: current model vs opponent model.
+    current_ports: list of ports serving current model
+    opponent_ports: list of ports serving opponent model
+    Returns (win_rate, stdout_lines)."""
+    os.makedirs(traj_dir, exist_ok=True)
+    if clean_traj:
+        for f in Path(traj_dir).glob('traj_*.jsonl'):
+            f.unlink()
+
+    if isinstance(current_ports, (list, tuple)):
+        port_str = ','.join(str(p) for p in current_ports)
+    else:
+        port_str = str(current_ports)
+    if isinstance(opponent_ports, (list, tuple)):
+        port2_str = ','.join(str(p) for p in opponent_ports)
+    else:
+        port2_str = str(opponent_ports)
+
+    cmd = _build_java_cmd(n_games, traj_dir, 'leagueplay',
+                          port_str, threads, heap='12g',
+                          port2_str=port2_str)
+    cwd = os.path.join(PROJECT_ROOT, 'forge-gui-desktop')
+
+    proc = subprocess.Popen(
+        cmd, cwd=cwd, stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT, text=True)
+
+    stdout_lines = []
+    try:
+        for line in proc.stdout:
+            stdout_lines.append(line)
+            if log_callback:
+                log_callback(line.rstrip())
+            if progress_callback and 'Game ' in line:
+                try:
+                    parts = line.split('Game ')[1].split('/')
+                    done = int(parts[0])
+                    progress_callback(done, n_games)
+                except (IndexError, ValueError):
+                    pass
+    except Exception:
+        pass
+
+    proc.wait()
+
+    # Parse win rate from output
+    win_rate = None
+    for line in reversed(stdout_lines):
+        if 'current win rate:' in line.lower():
+            try:
+                pct = line.split('win rate:')[1].split('%')[0]
+                win_rate = float(pct.strip()) / 100.0
+            except (IndexError, ValueError):
+                pass
+            break
+
+    if win_rate is None:
+        # Count from trajectory files
+        wins = losses = 0
+        for f in Path(traj_dir).glob('traj_*.jsonl'):
+            try:
+                with open(f) as fh:
+                    header = json.loads(fh.readline())
+                if header.get('won', False):
+                    wins += 1
+                else:
+                    losses += 1
+            except Exception:
+                pass
+        total = wins + losses
+        win_rate = wins / total if total > 0 else 0.0
+
+    return win_rate, stdout_lines
 
 def _build_java_cmd(n_games, traj_dir, mode, port_str,
                     threads, heap='3g', port2_str=None, decks=None):
