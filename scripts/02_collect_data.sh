@@ -1,43 +1,10 @@
 #!/bin/bash
-# Step 2: Collect trajectory data + preprocess with live dashboard
+# Step 2: Collect trajectory data + preprocess headlessly.
 # Usage: ./02_collect_data.sh [games] [--clean] [--zero-intermediate-reward] [--deck "Deck Name.dck"...]
-#   --clean: delete old trajectories and preprocessed data first
-#   --zero-intermediate-reward: record intermediateReward as 0.0 in trajectory JSONL
 set -e
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-PYTHON_DIR="$PROJECT_ROOT/forge-ai-rl/src/main/python"
-VENV_PY="$PROJECT_ROOT/forge-ai-rl/venv/bin/python3"
-VENV_PY_WIN="$PROJECT_ROOT/forge-ai-rl/venv/Scripts/python.exe"
-if command -v cygpath >/dev/null 2>&1; then
-    USERPROFILE_UNIX="$(cygpath "$USERPROFILE" 2>/dev/null || printf '%s' "$USERPROFILE")"
-    CONDA_PREFIX_UNIX="$(cygpath "$CONDA_PREFIX" 2>/dev/null || printf '%s' "$CONDA_PREFIX")"
-else
-    USERPROFILE_UNIX="$USERPROFILE"
-    CONDA_PREFIX_UNIX="$CONDA_PREFIX"
-fi
-CONDA_PY="$CONDA_PREFIX_UNIX/python"
-CONDA_PY_WIN="$CONDA_PREFIX_UNIX/python.exe"
-FORGE_RL_CONDA_WIN="$USERPROFILE_UNIX/anaconda3/envs/forge_rl/python.exe"
 
-if [ -x "$VENV_PY" ]; then
-    PYTHON="$VENV_PY"
-elif [ -f "$VENV_PY_WIN" ]; then
-    PYTHON="$VENV_PY_WIN"
-elif [ -n "$CONDA_PREFIX" ] && [ -x "$CONDA_PY" ]; then
-    PYTHON="$CONDA_PY"
-elif [ -n "$CONDA_PREFIX" ] && [ -f "$CONDA_PY_WIN" ]; then
-    PYTHON="$CONDA_PY_WIN"
-elif [ -n "$USERPROFILE" ] && [ -f "$FORGE_RL_CONDA_WIN" ]; then
-    PYTHON="$FORGE_RL_CONDA_WIN"
-elif command -v python3 >/dev/null 2>&1; then
-    PYTHON="python3"
-elif command -v python >/dev/null 2>&1; then
-    PYTHON="python"
-else
-    echo "No Python interpreter found."
-    exit 1
-fi
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/rl_common.sh"
+PYTHON="$(rl_find_python)"
 
 cd "$PYTHON_DIR"
 
@@ -69,5 +36,11 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-echo "Launching collection dashboard for $GAMES games..."
-"$PYTHON" training/collect_ui.py --games "$GAMES" "${EXTRA_ARGS[@]}"
+echo "Launching headless collection for $GAMES games..."
+JAR_PATH="$(rl_resolve_jar)"
+"$PYTHON" training/collect_headless.py \
+    --games "$GAMES" \
+    --output-dir "$(rl_to_python_path "$FORGE_RL_DATA_DIR")" \
+    --preprocessed-dir "$(rl_to_python_path "$FORGE_RL_PREPROCESSED_DIR")" \
+    --jar-path "$(rl_to_python_path "$JAR_PATH")" \
+    "${EXTRA_ARGS[@]}"

@@ -47,17 +47,21 @@ from model.gpu_config import auto_detect_profile
 from serving.model_server import ModelServer
 from training.mmap_dataset import parse_game_state, GAME_STATE_DIM, CARD_DIM, GLOBAL_DIM, ZONES_CONFIG
 from training.deck_config import load_rl_decks
+from training.runtime_paths import (
+    PROJECT_ROOT as RUNTIME_PROJECT_ROOT,
+    get_checkpoint_dir,
+    get_device_override,
+    get_ppo_traj_dir,
+    resolve_forge_jar,
+)
 
 import threading
 
 
 # ── Config ───────────────────────────────────────────
 
-PROJECT_ROOT = str(Path(__file__).resolve().parents[5])
-FORGE_JAR = os.path.join(
-    PROJECT_ROOT,
-    'forge-gui-desktop/target/'
-    'forge-gui-desktop-2.0.12-SNAPSHOT-jar-with-dependencies.jar')
+PROJECT_ROOT = str(RUNTIME_PROJECT_ROOT)
+FORGE_JAR = resolve_forge_jar()
 
 
 # ── Data loading for PPO ─────────────────────────────
@@ -1116,7 +1120,7 @@ def _build_java_cmd(n_games, traj_dir, mode, port_str,
         'java.base/java.lang.reflect=ALL-UNNAMED',
         '--add-opens',
         'java.desktop/javax.imageio.spi=ALL-UNNAMED',
-        '-jar', FORGE_JAR,
+        '-jar', resolve_forge_jar(),
         'rltrain', mode,
     ] + deck_args + [
         '-n', str(n_games),
@@ -1361,15 +1365,13 @@ def main():
         description='PPO Self-Play Training')
     parser.add_argument('--checkpoint',
         default=os.path.join(
-            PROJECT_ROOT,
-            'rl_data/checkpoints/model_with_decisions.pt'))
+            get_checkpoint_dir(),
+            'model_with_decisions.pt'))
     parser.add_argument('--save-dir',
-        default=os.path.join(
-            PROJECT_ROOT, 'rl_data/checkpoints'))
+        default=get_checkpoint_dir())
     parser.add_argument('--traj-dir',
-        default=os.path.join(
-            PROJECT_ROOT, 'rl_data/ppo_trajectories'))
-    parser.add_argument('--device', default=None)
+        default=get_ppo_traj_dir())
+    parser.add_argument('--device', default=get_device_override())
     parser.add_argument('--rounds', type=int, default=20,
         help='Number of collect→train rounds')
     parser.add_argument('--games-per-round', type=int,

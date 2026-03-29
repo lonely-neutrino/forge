@@ -1,10 +1,11 @@
 #!/bin/bash
 # Monitor PPO training rounds and log stats to a file
 # Usage: monitor_ppo.sh [log_file]
-LOG=${1:-/mnt/c/Users/Mark/Downloads/logging.log}
-STATE=/home/maustin/forge/rl_data/checkpoints/ppo_training_state.json
-TRAJ_DIR=/home/maustin/forge/rl_data/ppo_trajectories
-EVAL_DIR=/home/maustin/forge/rl_data/ppo_trajectories_eval
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/rl_common.sh"
+LOG=${1:-"$FORGE_RL_LOG_DIR/ppo_monitor.log"}
+STATE="$FORGE_RL_CHECKPOINT_DIR/ppo_training_state.json"
+TRAJ_DIR="$FORGE_RL_PPO_TRAJ_DIR"
+EVAL_DIR="$FORGE_RL_EVAL_DIR"
 LAST_ROUND=-1
 
 echo "PPO Monitor started — logging to $LOG" | tee "$LOG"

@@ -39,7 +39,12 @@ try:
 except ImportError:
     HAS_MPL = False
 
-from training.ppo_trainer import PROJECT_ROOT, FORGE_JAR
+from training.runtime_paths import (
+    PROJECT_ROOT,
+    get_data_dir,
+    get_preprocessed_dir,
+    resolve_forge_jar,
+)
 from training.deck_config import load_rl_decks
 
 import subprocess
@@ -218,8 +223,8 @@ def _run_preprocessing(state, traj_dir):
 def collect_thread(state, args):
     """Run Java data collection and monitor progress."""
     try:
-        output_dir = os.path.join(PROJECT_ROOT, 'rl_data/trajectories')
-        preproc_dir = os.path.join(PROJECT_ROOT, 'rl_data/preprocessed')
+        output_dir = getattr(args, 'output_dir', None) or get_data_dir()
+        preproc_dir = getattr(args, 'preprocessed_dir', None) or get_preprocessed_dir()
 
         if args.clean:
             import shutil
@@ -237,7 +242,7 @@ def collect_thread(state, args):
         state.status = f"Collecting {args.games} games..."
 
         log(state, f"Output: {output_dir}")
-        log(state, f"Games: {args.games}, Threads: 16")
+        log(state, f"Games: {args.games}, Threads: {args.threads}")
         log(state, "Intermediate reward recording: "
             + ("ZEROED" if args.zero_intermediate_reward else "NORMAL"))
 
@@ -248,17 +253,17 @@ def collect_thread(state, args):
             deck_args.extend(['-d', d])
 
         cmd = [
-            'java', '-Xmx8192m',
+            'java', f'-Xmx{args.heap_mb}m',
             '--add-opens', 'java.base/java.lang=ALL-UNNAMED',
             '--add-opens', 'java.base/java.util=ALL-UNNAMED',
             '--add-opens', 'java.base/java.text=ALL-UNNAMED',
             '--add-opens', 'java.base/java.lang.reflect=ALL-UNNAMED',
             '--add-opens', 'java.desktop/javax.imageio.spi=ALL-UNNAMED',
-            '-jar', FORGE_JAR,
+            '-jar', getattr(args, 'jar_path', None) or resolve_forge_jar(),
             'rltrain', 'collect',
         ] + deck_args + [
             '-n', str(args.games),
-            '-t', '16',
+            '-t', str(args.threads),
             '-o', output_dir,
         ]
         if args.zero_intermediate_reward:
@@ -459,10 +464,14 @@ def collect_thread(state, args):
         log(state, f"Collection time: {state.elapsed_sec:.0f}s")
 
         # === Preprocessing phase ===
-        _run_preprocessing(state, output_dir)
+        if not getattr(args, 'skip_preprocess', False):
+            _run_preprocessing(state, output_dir)
 
         state.phase = "done"
-        state.status = "Collection + preprocessing complete!"
+        if getattr(args, 'skip_preprocess', False):
+            state.status = "Collection complete!"
+        else:
+            state.status = "Collection + preprocessing complete!"
         state.elapsed_sec = time.time() - t0
         log(state, f"Total time: {state.elapsed_sec:.0f}s")
 
@@ -622,6 +631,12 @@ def main():
     parser.add_argument('--deck', action='append',
                         help='Override the configured RL deck list '
                              '(may be repeated)')
+    parser.add_argument('--output-dir', default=get_data_dir())
+    parser.add_argument('--preprocessed-dir', default=get_preprocessed_dir())
+    parser.add_argument('--skip-preprocess', action='store_true')
+    parser.add_argument('--threads', type=int, default=16)
+    parser.add_argument('--heap-mb', type=int, default=8192)
+    parser.add_argument('--jar-path', default=None)
     parser.add_argument('--zero-intermediate-reward',
                         action='store_true',
                         help='Store intermediateReward as 0.0 in collected trajectories')

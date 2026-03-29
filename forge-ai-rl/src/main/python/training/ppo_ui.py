@@ -438,10 +438,21 @@ def ppo_thread(state, args):
         log(state, f"Encoder UNFROZEN at LR={args.lr:.1e}")
         scaler = (torch.amp.GradScaler('cuda')
                   if use_amp else None)
+        save_dir = args.save_dir
+
+        # League play setup
+        use_league = getattr(args, 'league', False)
+        league = None
+        if use_league:
+            league = LeagueManager(
+                save_dir,
+                snapshot_interval=getattr(
+                    args, 'snapshot_interval', 5),
+                max_snapshots=15)
+            log(state, "League play ENABLED")
 
         # Resume training state if available
         import json as json_mod
-        save_dir = args.save_dir
         state_path = os.path.join(
             save_dir, 'ppo_training_state.json')
         start_round = 0
@@ -503,10 +514,15 @@ def ppo_thread(state, args):
         # For run_games: pass list if multi-server, single int if one
         port_arg = ports if len(ports) > 1 else ports[0]
 
-        traj_dir = os.path.join(
-            PROJECT_ROOT, 'rl_data/ppo_trajectories')
-        eval_dir = traj_dir + '_eval'
+        traj_dir = getattr(
+            args,
+            'traj_dir',
+            os.path.join(PROJECT_ROOT, 'rl_data/ppo_trajectories'),
+        )
+        eval_dir = getattr(args, 'eval_dir', traj_dir + '_eval')
         os.makedirs(save_dir, exist_ok=True)
+        os.makedirs(traj_dir, exist_ok=True)
+        os.makedirs(eval_dir, exist_ok=True)
 
         shaping_coeff = getattr(
             args, 'reward_shaping_coeff', 0.0)
@@ -515,17 +531,6 @@ def ppo_thread(state, args):
         if shaping_coeff > 0:
             log(state, f"Reward shaping: coeff={shaping_coeff}, "
                 f"decay={shaping_decay}/round")
-
-        # League play setup
-        use_league = getattr(args, 'league', False)
-        league = None
-        if use_league:
-            league = LeagueManager(
-                save_dir,
-                snapshot_interval=getattr(
-                    args, 'snapshot_interval', 5),
-                max_snapshots=15)
-            log(state, "League play ENABLED")
 
         start_time = time.time()
 
@@ -1498,6 +1503,12 @@ def main():
     parser.add_argument('--save-dir',
         default=os.path.join(PROJECT_ROOT,
             'rl_data/checkpoints'))
+    parser.add_argument('--traj-dir',
+        default=os.path.join(PROJECT_ROOT,
+            'rl_data/ppo_trajectories'))
+    parser.add_argument('--eval-dir',
+        default=os.path.join(PROJECT_ROOT,
+            'rl_data/ppo_trajectories_eval'))
     parser.add_argument('--device', default=None)
     parser.add_argument('--rounds', type=int, default=20)
     parser.add_argument('--games-per-round', type=int,

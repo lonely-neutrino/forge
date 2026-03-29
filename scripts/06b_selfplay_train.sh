@@ -1,24 +1,21 @@
 #!/bin/bash
-# Step 9: Self-play PPO training with Elo tracking
-# Usage: 09_selfplay_train.sh [model] [rounds] [games] [device]
-#
-# Both players are the RL model — guarantees 50% win rate for balanced signal.
-# Periodically evaluates vs heuristic to measure absolute strength.
-# Kill anytime (Ctrl+C) — progress is saved after each round.
+# Step 6b: Self-play PPO training with Elo tracking
+# Usage: 06b_selfplay_train.sh [model] [rounds] [games] [device]
 set -e
-cd /home/maustin/forge/forge-ai-rl/src/main/python
-source /home/maustin/forge/forge-ai-rl/venv/bin/activate
 
-pkill -f "model_server\|ppo_ui" 2>/dev/null || true
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/rl_common.sh"
+PYTHON="$(rl_find_python)"
+cd "$PYTHON_DIR"
+
+pkill -f "model_server\|ppo_ui\|ppo_headless" 2>/dev/null || true
 sleep 1
 
-SAVE_DIR=/home/maustin/forge/rl_data/checkpoints
+SAVE_DIR="$FORGE_RL_CHECKPOINT_DIR"
 LATEST_PPO="$SAVE_DIR/ppo_model_latest.pt"
 BEST_PPO="$SAVE_DIR/best_ppo_model.pt"
 IMITATION="$SAVE_DIR/model_with_decisions.pt"
 
-# Auto-resume: latest > best > imitation
-if [ -n "$1" ]; then
+if [ -n "${1:-}" ]; then
     MODEL="$1"
 elif [ -f "$LATEST_PPO" ]; then
     MODEL="$LATEST_PPO"
@@ -33,16 +30,18 @@ fi
 
 ROUNDS=${2:-100}
 GAMES=${3:-400}
-DEVICE=${4:-dml}
+DEVICE=${4:-$(rl_auto_device)}
 
 echo "Self-Play PPO: $ROUNDS rounds, $GAMES games/round"
 echo "Model: $MODEL"
-echo "Kill anytime — progress saved after each round"
+echo "Kill anytime - progress saved after each round"
 echo ""
 
-python training/ppo_ui.py \
-    --checkpoint "$MODEL" \
-    --save-dir "$SAVE_DIR" \
+"$PYTHON" training/ppo_headless.py \
+    --checkpoint "$(rl_to_python_path "$MODEL")" \
+    --save-dir "$(rl_to_python_path "$SAVE_DIR")" \
+    --traj-dir "$(rl_to_python_path "$FORGE_RL_PPO_TRAJ_DIR")" \
+    --eval-dir "$(rl_to_python_path "$FORGE_RL_EVAL_DIR")" \
     --device "$DEVICE" \
     --rounds "$ROUNDS" \
     --games-per-round "$GAMES" \

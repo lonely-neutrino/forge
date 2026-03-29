@@ -1,13 +1,14 @@
 #!/bin/bash
 # Step 5: Evaluate RL model vs heuristic AI
 # Usage: 05_eval.sh [checkpoint] [games] [device]
-# Uses the same server+Java approach as PPO training
 set -e
-cd /home/maustin/forge/forge-ai-rl/src/main/python
-source /home/maustin/forge/forge-ai-rl/venv/bin/activate
 
-CKPT_DIR=/home/maustin/forge/rl_data/checkpoints
-if [ -z "$1" ]; then
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/rl_common.sh"
+PYTHON="$(rl_find_python)"
+cd "$PYTHON_DIR"
+
+CKPT_DIR="$FORGE_RL_CHECKPOINT_DIR"
+if [ -z "${1:-}" ]; then
     if [ -f "$CKPT_DIR/best_ppo_model.pt" ]; then
         CKPT="$CKPT_DIR/best_ppo_model.pt"
     elif [ -f "$CKPT_DIR/model_with_decisions.pt" ]; then
@@ -19,13 +20,15 @@ else
     CKPT="$1"
 fi
 GAMES=${2:-100}
-DEVICE=${3:-dml}
+DEVICE=${3:-$(rl_auto_device)}
+EVAL_DIR="${FORGE_RL_EVAL_DIR:-${TMPDIR:-/tmp}/rl_eval}"
 
 echo "Evaluating RL model vs heuristic..."
 echo "  Checkpoint: $CKPT"
 echo "  Games: $GAMES"
+echo "  Device: $DEVICE"
 
-python -c "
+"$PYTHON" -c "
 import sys, os
 sys.path.insert(0, '.')
 from training.ppo_trainer import run_games, ModelServerError
@@ -33,16 +36,15 @@ from serving.model_server import ModelServer
 from model.mtg_model import MTGModel
 import threading, json, time
 
-checkpoint = '$CKPT'
+checkpoint = r'$CKPT'
 n_games = $GAMES
-eval_dir = '/tmp/rl_eval'
+eval_dir = r'$EVAL_DIR'
+os.makedirs(eval_dir, exist_ok=True)
 
-# Load model and start server
 model = MTGModel.load(checkpoint, device='$DEVICE')
 model.eval()
 server = ModelServer(model, host='0.0.0.0', port=0, device='$DEVICE')
 
-# Find the actual port
 import socket
 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 sock.bind(('', 0))
@@ -55,9 +57,8 @@ t.start()
 time.sleep(2)
 print(f'Server started on port {port}')
 
-# Run eval
 try:
-    win_rate, results = run_games(
+    win_rate, _ = run_games(
         n_games, eval_dir, mode='evaluate',
         port=str(port), threads=16, java_procs=2)
     print(f'\n=== Result: {win_rate:.1%} win rate ({int(win_rate*n_games)}/{n_games}) ===')
@@ -65,11 +66,11 @@ except ModelServerError as e:
     print(f'FATAL: {e}')
     sys.exit(1)
 
-# Verify no fallbacks
 total = 0
 fallback = 0
 for f in os.listdir(eval_dir):
-    if not f.endswith('.jsonl'): continue
+    if not f.endswith('.jsonl'):
+        continue
     with open(os.path.join(eval_dir, f)) as fh:
         lines = fh.readlines()
     for line in lines[1:]:
