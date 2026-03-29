@@ -29,7 +29,8 @@ public class RecordingLobbyPlayerAi extends LobbyPlayerAi {
     public TrajectoryRecorder getRecorder() {
         if (recorder == null && config != null) {
             recorder = new TrajectoryRecorder(
-                    config.getTrajectoryOutputDir());
+                    config.getTrajectoryOutputDir(),
+                    config.isZeroIntermediateReward());
         }
         return recorder;
     }

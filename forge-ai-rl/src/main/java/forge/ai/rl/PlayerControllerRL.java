@@ -12,6 +12,7 @@ import forge.game.player.*;
 import forge.game.spellability.SpellAbility;
 import forge.game.trigger.WrappedAbility;
 import forge.game.zone.ZoneType;
+import forge.util.ReplayRandom;
 import forge.util.collect.FCollectionView;
 
 import org.apache.commons.lang3.tuple.ImmutablePair;
@@ -20,6 +21,7 @@ import org.tinylog.Logger;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Supplier;
 
 /**
  * PlayerController for the Reinforcement Learning AI.
@@ -84,7 +86,8 @@ public class PlayerControllerRL extends forge.ai.PlayerControllerAi {
         if (rl.isModelServerAvailable()) {
             // Let the heuristic build the candidate lists (lands, filtering, etc.)
             // then use the RL model to pick from the mechanically-legal set
-            List<SpellAbility> heuristicResult = super.chooseSpellAbilityToPlay();
+            List<SpellAbility> heuristicResult = withHeuristicDecisionRandom(
+                    "PRIORITY_CANDIDATES", "rl_candidate_build", List.of(), () -> super.chooseSpellAbilityToPlay());
 
             // Get all mechanically legal spells (broad candidate set)
             List<SpellAbility> candidates = getAi().getLastPlayableSpellAbilities();
@@ -170,7 +173,8 @@ public class PlayerControllerRL extends forge.ai.PlayerControllerAi {
             return rlResult;
         } else {
             // Heuristic decides — record the decision
-            List<SpellAbility> result = super.chooseSpellAbilityToPlay();
+            List<SpellAbility> result = withHeuristicDecisionRandom(
+                    "PRIORITY_ACTION", "heuristic_priority", List.of(), () -> super.chooseSpellAbilityToPlay());
 
             // Get all mechanically legal spells as candidates
             List<SpellAbility> candidates = getAi().getLastPlayableSpellAbilities();
@@ -225,7 +229,9 @@ public class PlayerControllerRL extends forge.ai.PlayerControllerAi {
             rl.capturePreDecisionState(possibleAttackers);
 
             // 2. Let heuristic make the decision (modifies combat object)
-            super.declareAttackers(attacker, combat);
+            withHeuristicDecisionRandom(
+                    "DECLARE_ATTACKERS", "heuristic_attackers", describeCards(possibleAttackers),
+                    () -> super.declareAttackers(attacker, combat));
 
             // 3. Read back what the heuristic chose from the combat object
             CardCollection actualAttackers = combat.getAttackers();
@@ -273,7 +279,9 @@ public class PlayerControllerRL extends forge.ai.PlayerControllerAi {
             // Capture state BEFORE the heuristic modifies combat
             rl.capturePreDecisionState(possibleBlockers);
 
-            super.declareBlockers(defender, combat);
+            withHeuristicDecisionRandom(
+                    "DECLARE_BLOCKERS", "heuristic_blockers",
+                    describeCards(possibleBlockers), () -> super.declareBlockers(defender, combat));
 
             // Read back the full assignment: which blocker blocks which attacker
             // Record as (blocker, attacker) pairs matching inference format
@@ -304,15 +312,17 @@ public class PlayerControllerRL extends forge.ai.PlayerControllerAi {
         forge.game.spellability.TargetChoices chosen = sa.getTargets();
         if (chosen.isEmpty()) return;
 
-        // Get the legal candidate list.
-        // getAllCandidates excludes already-chosen targets, so we need to
-        // include the chosen targets in the candidate list.
-        List<GameEntity> candidates = new ArrayList<>();
+        // Capture the raw legal target list for replay visualization.
+        // Forge's getAllCandidates can exclude already-chosen targets during
+        // resolution, so we keep a second augmented list for index stability.
+        List<GameEntity> rawCandidates = new ArrayList<>();
 
         // Add all currently legal targets
         if (sa.getTargetRestrictions() != null) {
-            candidates.addAll(sa.getTargetRestrictions().getAllCandidates(sa, true));
+            rawCandidates.addAll(sa.getTargetRestrictions().getAllCandidates(sa, true));
         }
+
+        List<GameEntity> candidates = new ArrayList<>(rawCandidates);
 
         // Add the chosen targets back (they were excluded by getAllCandidates)
         for (Object obj : chosen) {
@@ -354,6 +364,8 @@ public class PlayerControllerRL extends forge.ai.PlayerControllerAi {
         float[] spellFeats = ActionEncoder.encode(sa);
         rl.recordDecisionDirect(DecisionType.TARGET_SELECTION,
                 candidates.size(), selectedIndices, feats,
+                describeEntities(candidates),
+                describeEntities(rawCandidates),
                 "spell_target_" + spellName + "_" + apiName, spellFeats);
     }
 
@@ -381,9 +393,13 @@ public class PlayerControllerRL extends forge.ai.PlayerControllerAi {
             return optionList.get(idx);
         }
 
-        T result = super.chooseSingleEntityForEffect(
-                optionList, delayedReveal, sa, title,
-                isOptional, targetedPlayer, params);
+        T result = withHeuristicDecisionRandom(
+                "TARGET_SELECTION",
+                buildSpellDecisionDetail(title, sa),
+                describeEntities(optionList),
+                () -> super.chooseSingleEntityForEffect(
+                        optionList, delayedReveal, sa, title,
+                        isOptional, targetedPlayer, params));
         // Record heuristic's choice (RECORD_HEURISTIC mode only)
         if (result != null && optionList.size() > 1) {
             List<float[]> feats = new ArrayList<>();
@@ -404,6 +420,7 @@ public class PlayerControllerRL extends forge.ai.PlayerControllerAi {
             float[] spellFeats = sa != null ? ActionEncoder.encode(sa) : null;
             rl.recordDecisionDirect(DecisionType.TARGET_SELECTION,
                     optionList.size(), List.of(idx), feats,
+                    describeEntities(optionList),
                     "target_" + title, spellFeats);
         }
         return result;
@@ -425,9 +442,13 @@ public class PlayerControllerRL extends forge.ai.PlayerControllerAi {
             }
             return rlResult;
         }
-        CardCollectionView result = super.chooseCardsForEffect(
-                sourceList, sa, title, min, max,
-                isOptional, params);
+        CardCollectionView result = withHeuristicDecisionRandom(
+                "CARD_SELECTION",
+                buildSpellDecisionDetail(title, sa),
+                describeCards(sourceList),
+                () -> super.chooseCardsForEffect(
+                        sourceList, sa, title, min, max,
+                        isOptional, params));
         if (result != null && !result.isEmpty() && sourceList.size() > 1) {
             List<float[]> feats = new ArrayList<>();
             for (Card c : sourceList) {
@@ -440,6 +461,7 @@ public class PlayerControllerRL extends forge.ai.PlayerControllerAi {
             }
             rl.recordDecisionDirect(DecisionType.CARD_SELECTION,
                     sourceList.size(), indices, feats,
+                    describeCards(sourceList),
                     "cards_for_effect_" + title);
         }
         return result;
@@ -457,8 +479,12 @@ public class PlayerControllerRL extends forge.ai.PlayerControllerAi {
             }
             return rlResult;
         }
-        CardCollectionView result = super.choosePermanentsToSacrifice(
-                sa, min, max, validTargets, msg);
+        CardCollectionView result = withHeuristicDecisionRandom(
+                "CARD_SELECTION",
+                buildSpellDecisionDetail("sacrifice", sa),
+                describeCards(validTargets),
+                () -> super.choosePermanentsToSacrifice(
+                        sa, min, max, validTargets, msg));
         if (result != null && validTargets.size() > 1) {
             List<float[]> feats = new ArrayList<>();
             for (Card c : validTargets) {
@@ -471,6 +497,7 @@ public class PlayerControllerRL extends forge.ai.PlayerControllerAi {
             }
             rl.recordDecisionDirect(DecisionType.CARD_SELECTION,
                     validTargets.size(), indices, feats,
+                    describeCards(validTargets),
                     "sacrifice");
         }
         return result;
@@ -488,8 +515,12 @@ public class PlayerControllerRL extends forge.ai.PlayerControllerAi {
             }
             return rlResult;
         }
-        CardCollectionView result = super.chooseCardsToDiscardFrom(
-                p, sa, validCards, min, max);
+        CardCollectionView result = withHeuristicDecisionRandom(
+                "CARD_SELECTION",
+                buildSpellDecisionDetail("discard", sa),
+                describeCards(validCards),
+                () -> super.chooseCardsToDiscardFrom(
+                        p, sa, validCards, min, max));
         if (result != null && validCards.size() > 1) {
             List<float[]> feats = new ArrayList<>();
             for (Card c : validCards) {
@@ -502,6 +533,7 @@ public class PlayerControllerRL extends forge.ai.PlayerControllerAi {
             }
             rl.recordDecisionDirect(DecisionType.CARD_SELECTION,
                     validCards.size(), indices, feats,
+                    describeCards(validCards),
                     "discard");
         }
         return new CardCollection(result);
@@ -518,7 +550,9 @@ public class PlayerControllerRL extends forge.ai.PlayerControllerAi {
         }
 
         ImmutablePair<CardCollection, CardCollection> result =
-                super.arrangeForScry(topN);
+                withHeuristicDecisionRandom(
+                        "CARD_SELECTION", "scry", describeCards(topN),
+                        () -> super.arrangeForScry(topN));
 
         // Record which cards stayed on top
         List<Integer> topIndices = new ArrayList<>();
@@ -528,6 +562,7 @@ public class PlayerControllerRL extends forge.ai.PlayerControllerAi {
         }
         rl.recordDecisionDirect(DecisionType.CARD_SELECTION,
                 topN.size(), topIndices, feats,
+                describeCards(topN),
                 "scry_top_" + result.getLeft().size());
         return result;
     }
@@ -551,10 +586,13 @@ public class PlayerControllerRL extends forge.ai.PlayerControllerAi {
             handFeats.add(CardFeatures.encode(c, player));
         }
 
-        boolean keep = super.mulliganKeepHand(firstPlayer, cardsToReturn);
+        boolean keep = withHeuristicDecisionRandom(
+                "MULLIGAN", "mulligan_" + cardsToReturn, describeCards(hand),
+                () -> super.mulliganKeepHand(firstPlayer, cardsToReturn));
 
         rl.recordDecisionDirect(DecisionType.MULLIGAN,
                 2, List.of(keep ? 1 : 0), handFeats,
+                List.of("MULLIGAN", "KEEP"),
                 "mulligan_" + cardsToReturn + (keep ? "_keep" : "_mull"));
         return keep;
     }
@@ -573,10 +611,13 @@ public class PlayerControllerRL extends forge.ai.PlayerControllerAi {
             return result;
         }
 
-        boolean result = super.confirmAction(
-                sa, mode, message, options, cardToShow, params);
+        boolean result = withHeuristicDecisionRandom(
+                "BINARY_CHOICE", "confirm_" + mode, options != null ? options : List.of(),
+                () -> super.confirmAction(
+                        sa, mode, message, options, cardToShow, params));
         rl.recordDecisionDirect(DecisionType.BINARY_CHOICE,
                 2, List.of(result ? 1 : 0), null,
+                List.of("NO", "YES"),
                 "confirm_" + mode);
         return result;
     }
@@ -589,10 +630,72 @@ public class PlayerControllerRL extends forge.ai.PlayerControllerAi {
             return result;
         }
 
-        boolean result = super.confirmTrigger(wrapper);
+        boolean result = withHeuristicDecisionRandom(
+                "BINARY_CHOICE", "trigger", List.of(wrapper.toString()),
+                () -> super.confirmTrigger(wrapper));
         rl.recordDecisionDirect(DecisionType.BINARY_CHOICE,
                 2, List.of(result ? 1 : 0), null,
+                List.of("NO", "YES"),
                 "trigger");
         return result;
+    }
+
+    private static List<String> describeCards(Iterable<Card> cards) {
+        List<String> labels = new ArrayList<>();
+        for (Card card : cards) {
+            labels.add(card.getName());
+        }
+        return labels;
+    }
+
+    private static List<String> describeEntities(Iterable<? extends GameEntity> entities) {
+        List<String> labels = new ArrayList<>();
+        for (GameEntity entity : entities) {
+            labels.add(entity.toString());
+        }
+        return labels;
+    }
+
+    private String currentDecisionDetail(String decisionType, String detail, List<String> optionLabels) {
+        StringBuilder sb = new StringBuilder();
+        sb.append(player.getName());
+        sb.append("|turn=").append(getGame().getPhaseHandler().getTurn());
+        sb.append("|phase=").append(getGame().getPhaseHandler().getPhase());
+        sb.append("|decision=").append(decisionType);
+        sb.append("|detail=").append(detail != null ? detail : "");
+        if (optionLabels != null) {
+            for (String label : optionLabels) {
+                sb.append("|opt=").append(label);
+            }
+        }
+        return sb.toString();
+    }
+
+    private <T> T withHeuristicDecisionRandom(String decisionType,
+                                              String detail,
+                                              List<String> optionLabels,
+                                              Supplier<T> action) {
+        return ReplayRandom.runWithDecisionRandom(
+                player.getName(),
+                decisionType,
+                currentDecisionDetail(decisionType, detail, optionLabels),
+                action);
+    }
+
+    private void withHeuristicDecisionRandom(String decisionType,
+                                             String detail,
+                                             List<String> optionLabels,
+                                             Runnable action) {
+        ReplayRandom.runWithDecisionRandom(
+                player.getName(),
+                decisionType,
+                currentDecisionDetail(decisionType, detail, optionLabels),
+                action);
+    }
+
+    private static String buildSpellDecisionDetail(String title, SpellAbility sa) {
+        String spellName = sa != null && sa.getHostCard() != null ? sa.getHostCard().getName() : "unknown";
+        String apiName = sa != null && sa.getApi() != null ? sa.getApi().name() : "none";
+        return (title != null ? title : "decision") + "|" + spellName + "|" + apiName;
     }
 }

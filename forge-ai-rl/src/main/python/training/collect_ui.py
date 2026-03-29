@@ -238,6 +238,8 @@ def collect_thread(state, args):
 
         log(state, f"Output: {output_dir}")
         log(state, f"Games: {args.games}, Threads: 16")
+        log(state, "Intermediate reward recording: "
+            + ("ZEROED" if args.zero_intermediate_reward else "NORMAL"))
 
         decks = load_rl_decks(overrides=args.deck)
         log(state, f"Decks: {', '.join(decks)}")
@@ -259,6 +261,8 @@ def collect_thread(state, args):
             '-t', '16',
             '-o', output_dir,
         ]
+        if args.zero_intermediate_reward:
+            cmd.append('-zero-intermediate-reward')
 
         cwd = os.path.join(PROJECT_ROOT, 'forge-gui-desktop')
         t0 = time.time()
@@ -618,6 +622,9 @@ def main():
     parser.add_argument('--deck', action='append',
                         help='Override the configured RL deck list '
                              '(may be repeated)')
+    parser.add_argument('--zero-intermediate-reward',
+                        action='store_true',
+                        help='Store intermediateReward as 0.0 in collected trajectories')
     args = parser.parse_args()
 
     state = CollectState()

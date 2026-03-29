@@ -13,6 +13,7 @@ import forge.ai.LobbyPlayerAi;
 import forge.ai.rl.LobbyPlayerRL;
 import forge.ai.rl.ModelServerException;
 import forge.ai.rl.PlayerControllerRL;
+import forge.ai.rl.ReplayConfig;
 import forge.ai.rl.RLConfig;
 import forge.ai.rl.RLModelMode;
 import forge.deck.Deck;
@@ -23,6 +24,8 @@ import forge.game.player.RegisteredPlayer;
 import forge.localinstance.properties.ForgeConstants;
 import forge.model.FModel;
 import forge.player.GamePlayerUtil;
+import forge.util.MyRandom;
+import forge.util.ReplayRandom;
 
 /**
  * Headless runner for RL training data collection and evaluation.
@@ -76,11 +79,32 @@ public class SimulateRLTraining {
                 ? params.get("o").get(0) : "rl_data/trajectories";
         boolean quiet = params.containsKey("q");
         boolean useOnnx = params.containsKey("onnx");
+        boolean deterministic = params.containsKey("deterministic");
+        boolean zeroIntermediateReward = params.containsKey("zero-intermediate-reward");
         int threads = params.containsKey("t")
                 ? Integer.parseInt(params.get("t").get(0))
                 : Runtime.getRuntime().availableProcessors();
+        if (deterministic && threads != 1) {
+            threads = 1;
+            System.out.println("Deterministic replay forces single-threaded execution.");
+        }
         String grpcHost = params.containsKey("host")
                 ? params.get("host").get(0) : "localhost";
+        Long seed = params.containsKey("seed")
+                ? Long.parseLong(params.get("seed").get(0))
+                : null;
+        String replayId = params.containsKey("replay-id")
+                ? params.get("replay-id").get(0)
+                : null;
+        String traceOut = params.containsKey("trace-out")
+                ? params.get("trace-out").get(0)
+                : "rl_data/replays";
+        String baselinePolicy = params.containsKey("baseline")
+                ? params.get("baseline").get(0).toLowerCase()
+                : "heuristic";
+        String comparePolicy = params.containsKey("compare")
+                ? params.get("compare").get(0).toLowerCase()
+                : "rl";
         // Support comma-separated ports for multi-server parallelism
         int[] grpcPorts;
         if (params.containsKey("port")) {
@@ -154,7 +178,8 @@ public class SimulateRLTraining {
 
         switch (mode) {
             case "collect":
-                runCollectionMode(decks, nGames, timeout, outputDir, quiet, threads);
+                runCollectionMode(decks, nGames, timeout, outputDir, quiet, threads,
+                        zeroIntermediateReward);
                 break;
             case "evaluate":
                 runEvaluationMode(decks, nGames, timeout, outputDir, quiet, grpcHost, grpcPorts, threads, useOnnx);
@@ -173,6 +198,15 @@ public class SimulateRLTraining {
                 runHeadToHeadMode(decks, nGames, timeout, outputDir, quiet, threads,
                         onnxDir1, onnxDir2);
                 break;
+            case "replaydiff":
+                if (seed == null) {
+                    System.out.println("Replay diff mode requires -seed <long>");
+                    return;
+                }
+                runReplayDiffMode(decks, timeout, quiet, grpcHost, grpcPort,
+                        useOnnx, seed, replayId, traceOut,
+                        baselinePolicy, comparePolicy, onnxDir1);
+                break;
             default:
                 System.out.println("Unknown mode: " + mode);
                 printHelp();
@@ -185,9 +219,12 @@ public class SimulateRLTraining {
      * Runs games in parallel across multiple threads.
      */
     private static void runCollectionMode(List<Deck> decks, int nGames, int timeout,
-                                           String outputDir, boolean quiet, int threads) {
+                                           String outputDir, boolean quiet, int threads,
+                                           boolean zeroIntermediateReward) {
         System.out.println("=== Imitation Learning Data Collection ===");
         System.out.println("Using " + threads + " threads");
+        System.out.println("Intermediate reward recording: "
+                + (zeroIntermediateReward ? "ZEROED" : "NORMAL"));
 
         AtomicInteger completed = new AtomicInteger(0);
         AtomicInteger p1Wins = new AtomicInteger(0);
@@ -221,6 +258,7 @@ public class SimulateRLTraining {
                 RLConfig config = new RLConfig();
                 config.setMode(RLModelMode.RECORD_HEURISTIC);
                 config.setRecordTrajectories(true);
+                config.setZeroIntermediateReward(zeroIntermediateReward);
                 config.setTrajectoryOutputDir(outputDir);
 
                 try {
@@ -681,12 +719,72 @@ public class SimulateRLTraining {
                 draws.get());
     }
 
+    private static void runReplayDiffMode(List<Deck> decks, int timeout,
+                                          boolean quiet, String grpcHost,
+                                          int grpcPort, boolean useOnnx,
+                                          long seed, String replayId,
+                                          String traceOut,
+                                          String baselinePolicy,
+                                          String comparePolicy,
+                                          String onnxDir1) {
+        if (decks.size() < 2) {
+            System.out.println("Replay diff mode requires exactly two decks.");
+            return;
+        }
+        String resolvedReplayId = replayId != null ? replayId
+                : "replay_" + seed;
+        Deck deck1 = decks.get(0);
+        Deck deck2 = decks.get(1);
+
+        System.out.println("=== Deterministic Replay Diff Mode ===");
+        System.out.println("Replay ID: " + resolvedReplayId);
+        System.out.println("Seed: " + seed);
+        System.out.println("Baseline: " + baselinePolicy + " vs heuristic");
+        System.out.println("Compare: " + comparePolicy + " vs heuristic");
+
+        RLConfig baselineP1 = buildPolicyConfig(
+                baselinePolicy, grpcHost, grpcPort, useOnnx, onnxDir1,
+                buildReplayConfig(seed, resolvedReplayId, "baseline", traceOut));
+        RLConfig baselineP2 = buildPolicyConfig(
+                "heuristic", grpcHost, grpcPort, useOnnx, onnxDir1,
+                buildReplayConfig(seed, resolvedReplayId, "baseline", traceOut));
+        RLConfig compareP1 = buildPolicyConfig(
+                comparePolicy, grpcHost, grpcPort, useOnnx, onnxDir1,
+                buildReplayConfig(seed, resolvedReplayId, "compare", traceOut));
+        RLConfig compareP2 = buildPolicyConfig(
+                "heuristic", grpcHost, grpcPort, useOnnx, onnxDir1,
+                buildReplayConfig(seed, resolvedReplayId, "compare", traceOut));
+
+        GameResult baseline = runSingleGame(deck1, deck2, baselineP1, baselineP2,
+                "PlayerA", "PlayerB", timeout, true);
+        GameResult compare = runSingleGame(deck1, deck2, compareP1, compareP2,
+                "PlayerA", "PlayerB", timeout, true);
+
+        if (!quiet) {
+            System.out.println("Baseline result: " + baseline.summary);
+            System.out.println("Compare result: " + compare.summary);
+            System.out.println("Replay traces saved to: " + traceOut);
+        }
+    }
+
     // ===== Core game execution =====
 
     private static GameResult runSingleGame(Deck deck1, Deck deck2,
                                               RLConfig config1, RLConfig config2,
                                               String name1, String name2,
                                               int timeoutSec, boolean p1First) {
+        java.util.Random originalRandom = MyRandom.getRandom();
+        ReplayConfig replay = config1.getReplayConfig() != null
+                ? config1.getReplayConfig()
+                : config2.getReplayConfig();
+        if (replay != null) {
+            ReplayRandom.startSession(replay.getSeed(), replay.getReplayId(),
+                    replay.getRunLabel(), replay.isDeterministicPolicy(),
+                    replay.isRngAuditEnabled());
+            MyRandom.setRandom(new java.util.Random(replay.getSeed()));
+        }
+
+        try {
         // Create players
         LobbyPlayer lobby1 = createPlayer(name1, config1);
         LobbyPlayer lobby2 = createPlayer(name2, config2);
@@ -729,7 +827,8 @@ public class SimulateRLTraining {
                             p.getName(),
                             isPlayerOnePerspective ? name2 : name1,
                             isPlayerOnePerspective ? deck1Name : deck2Name,
-                            isPlayerOnePerspective ? deck2Name : deck1Name);
+                            isPlayerOnePerspective ? deck2Name : deck1Name,
+                            p.getLobbyPlayer().equals(lobby1) ? 1 : 2);
             }
         }
 
@@ -798,6 +897,10 @@ public class SimulateRLTraining {
         result.turns = game.getPhaseHandler().getTurn();
 
         return result;
+        } finally {
+            MyRandom.setRandom(originalRandom);
+            ReplayRandom.endSession();
+        }
     }
 
     private static LobbyPlayer createPlayer(String name, RLConfig config) {
@@ -844,6 +947,7 @@ public class SimulateRLTraining {
         System.out.println("  collect   - Record heuristic AI games for imitation learning");
         System.out.println("  evaluate  - Evaluate RL AI against heuristic AI");
         System.out.println("  selfplay  - Run RL AI self-play games");
+        System.out.println("  replaydiff - Run deterministic baseline/compare games with paired traces");
         System.out.println();
         System.out.println("Options:");
         System.out.println("  -d <deck>     Deck file (.dck) or deck name (repeat for multiple)");
@@ -854,7 +958,46 @@ public class SimulateRLTraining {
         System.out.println("  -c <seconds>  Timeout per game (default: 180)");
         System.out.println("  -host <host>  Model server host (default: localhost)");
         System.out.println("  -port <port>  Model server port (default: 50051)");
+        System.out.println("  -seed <long>  Seed for deterministic replay");
+        System.out.println("  -replay-id <id> Replay identifier for paired trace files");
+        System.out.println("  -trace-out <dir> Replay trace output directory");
+        System.out.println("  -deterministic Enable deterministic replay mode");
+        System.out.println("  -zero-intermediate-reward Zero stored intermediateReward values in trajectory JSONL");
+        System.out.println("  -baseline <heuristic|rl> Baseline player-one policy for replaydiff");
+        System.out.println("  -compare <heuristic|rl> Compare player-one policy for replaydiff");
         System.out.println("  -q            Quiet mode");
+    }
+
+    private static ReplayConfig buildReplayConfig(long seed, String replayId,
+                                                  String runLabel,
+                                                  String traceOut) {
+        return new ReplayConfig(seed, replayId, runLabel,
+                true, true, traceOut);
+    }
+
+    private static RLConfig buildPolicyConfig(String policyMode,
+                                              String grpcHost,
+                                              int grpcPort,
+                                              boolean useOnnx,
+                                              String onnxDir,
+                                              ReplayConfig replayConfig) {
+        RLConfig config = new RLConfig();
+        config.setReplayConfig(replayConfig);
+        if ("rl".equalsIgnoreCase(policyMode)) {
+            if (useOnnx) {
+                config.setMode(RLModelMode.ONNX);
+                if (onnxDir != null) {
+                    config.setOnnxModelDir(onnxDir);
+                }
+            } else {
+                config.setMode(RLModelMode.GRPC);
+                config.setGrpcHost(grpcHost);
+                config.setGrpcPort(grpcPort);
+            }
+        } else {
+            config.setMode(RLModelMode.RECORD_HEURISTIC);
+        }
+        return config;
     }
 
     private static float normalize(double v, double min, double max) {

@@ -451,11 +451,17 @@ public class ONNXModelClient {
         }
 
         Map<String, OnnxTensor> inputs = new HashMap<>();
-        inputs.put("state_embedding", OnnxTensor.createTensor(env, new float[][]{state}));
-        inputs.put("blocker_features", OnnxTensor.createTensor(env, bf));
-        inputs.put("blocker_mask", OnnxTensor.createTensor(env, bm));
-        inputs.put("attacker_features", OnnxTensor.createTensor(env, af));
-        inputs.put("attacker_mask", OnnxTensor.createTensor(env, am));
+        Set<String> expectedInputs = blockHead.getInputNames();
+        maybePutInput(inputs, expectedInputs,
+                "state_embedding", OnnxTensor.createTensor(env, new float[][]{state}));
+        maybePutInput(inputs, expectedInputs,
+                "blocker_features", OnnxTensor.createTensor(env, bf));
+        maybePutInput(inputs, expectedInputs,
+                "blocker_mask", OnnxTensor.createTensor(env, bm));
+        maybePutInput(inputs, expectedInputs,
+                "attacker_features", OnnxTensor.createTensor(env, af));
+        maybePutInput(inputs, expectedInputs,
+                "attacker_mask", OnnxTensor.createTensor(env, am));
 
         try (OrtSession.Result result = blockHead.run(inputs)) {
             float[][][] logits = (float[][][]) result.get(0).getValue();
@@ -643,6 +649,17 @@ public class ONNXModelClient {
             if (Math.abs(a[i] - b[i]) > tol) return false;
         }
         return true;
+    }
+
+    private static void maybePutInput(Map<String, OnnxTensor> inputs,
+                                      Set<String> expectedInputs,
+                                      String name,
+                                      OnnxTensor tensor) {
+        if (expectedInputs.contains(name)) {
+            inputs.put(name, tensor);
+            return;
+        }
+        tensor.close();
     }
 
     public void close() {

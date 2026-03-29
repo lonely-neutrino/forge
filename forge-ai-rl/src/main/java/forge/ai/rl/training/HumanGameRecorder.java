@@ -43,7 +43,7 @@ public class HumanGameRecorder implements IGameRecorder {
         this.player = player;
         this.game = player.getGame();
         this.stateEncoder = new GameStateEncoder(new RLConfig());
-        this.trajectoryRecorder = new TrajectoryRecorder(outputDir);
+        this.trajectoryRecorder = new TrajectoryRecorder(outputDir, false);
     }
 
     public void onGameStart(String gameId) {

@@ -30,6 +30,7 @@ public class ModelServerClient {
     private DataInputStream in;
     private DataOutputStream out;
     private boolean connected = false;
+    private ServerMetadata cachedMetadata;
 
     public ModelServerClient(RLConfig config) {
         this.config = config;
@@ -66,6 +67,7 @@ public class ModelServerClient {
             // ignore
         }
         connected = false;
+        cachedMetadata = null;
     }
 
     private static final int MAX_RETRIES = 3;
@@ -89,6 +91,7 @@ public class ModelServerClient {
 
             try {
                 InferenceRequest request = new InferenceRequest();
+                request.requestType = "decision";
                 request.decisionType = context.getType().name();
                 request.globalFeatures = context.getGameState().getGlobalFeatures();
                 request.gameStateFlat = context.getGameState().flatten();
@@ -98,19 +101,7 @@ public class ModelServerClient {
                 request.contextInfo = context.getContextInfo();
                 request.spellFeatures = context.getSpellFeatures();
 
-                String json = gson.toJson(request);
-                byte[] payload = json.getBytes(StandardCharsets.UTF_8);
-
-                out.writeInt(payload.length);
-                out.write(payload);
-                out.flush();
-
-                int responseLen = in.readInt();
-                byte[] responseBytes = new byte[responseLen];
-                in.readFully(responseBytes);
-                String responseJson = new String(responseBytes, StandardCharsets.UTF_8);
-
-                InferenceResponse response = gson.fromJson(responseJson, InferenceResponse.class);
+                InferenceResponse response = sendRequest(request, InferenceResponse.class);
                 return new DecisionResult(
                         response.selectedIndices != null ? response.selectedIndices : List.of(),
                         response.actionProbabilities != null ? response.actionProbabilities : new float[0],
@@ -138,10 +129,58 @@ public class ModelServerClient {
         return connected;
     }
 
+    public synchronized void ensureDeterministicReady() {
+        ServerMetadata metadata = getServerMetadata();
+        if (metadata == null) {
+            throw new ModelServerException("Could not fetch model server metadata for deterministic replay");
+        }
+        if (!metadata.useArgmax) {
+            throw new ModelServerException("Model server is not in argmax mode; deterministic replay requires --argmax");
+        }
+    }
+
+    public synchronized ServerMetadata getServerMetadata() {
+        if (!connected && !connect()) {
+            return null;
+        }
+        if (cachedMetadata != null) {
+            return cachedMetadata;
+        }
+        MetadataRequest request = new MetadataRequest();
+        request.requestType = "metadata";
+        try {
+            cachedMetadata = sendRequest(request, ServerMetadata.class);
+            return cachedMetadata;
+        } catch (IOException e) {
+            connected = false;
+            return null;
+        }
+    }
+
+    public ServerMetadata getCachedMetadata() {
+        return cachedMetadata;
+    }
+
+    private <T> T sendRequest(Object request, Class<T> responseClass) throws IOException {
+        String json = gson.toJson(request);
+        byte[] payload = json.getBytes(StandardCharsets.UTF_8);
+
+        out.writeInt(payload.length);
+        out.write(payload);
+        out.flush();
+
+        int responseLen = in.readInt();
+        byte[] responseBytes = new byte[responseLen];
+        in.readFully(responseBytes);
+        String responseJson = new String(responseBytes, StandardCharsets.UTF_8);
+        return gson.fromJson(responseJson, responseClass);
+    }
+
     /**
      * Request structure sent to the Python model server.
      */
     private static class InferenceRequest {
+        String requestType;
         String decisionType;
         float[] globalFeatures;
         float[] gameStateFlat;
@@ -152,6 +191,10 @@ public class ModelServerClient {
         float[] spellFeatures; // 64-dim source spell features for targeting
     }
 
+    private static class MetadataRequest {
+        String requestType;
+    }
+
     /**
      * Response structure from the Python model server.
      */
@@ -159,5 +202,11 @@ public class ModelServerClient {
         List<Integer> selectedIndices;
         float[] actionProbabilities;
         float valueEstimate;
+    }
+
+    public static class ServerMetadata {
+        public boolean useArgmax;
+        public String modelId;
+        public String backend;
     }
 }

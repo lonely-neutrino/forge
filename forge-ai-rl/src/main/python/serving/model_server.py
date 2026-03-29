@@ -156,7 +156,10 @@ class ModelServer:
                 try:
                     request = json.loads(payload.decode('utf-8'))
                     self.request_count += 1
-                    response = self._process_request(request)
+                    if request.get('requestType') == 'metadata':
+                        response = self._build_metadata()
+                    else:
+                        response = self._process_request(request)
                 except Exception as e:
                     response = {
                         'selectedIndices': [0],
@@ -202,6 +205,13 @@ class ModelServer:
             'selectedIndices': [0],
             'actionProbabilities': [],
             'valueEstimate': 0.0,
+        }
+
+    def _build_metadata(self) -> dict:
+        return {
+            'useArgmax': bool(self.use_argmax),
+            'modelId': getattr(self.model, '_loaded_from_path', 'in_memory'),
+            'backend': str(self.device),
         }
 
     @torch.no_grad()
@@ -592,6 +602,8 @@ def main():
     parser.add_argument('--port', type=int, default=50051, help='Server port')
     parser.add_argument('--model', default=None, help='Path to saved model weights')
     parser.add_argument('--device', default='cpu', help='Device (cpu/cuda/dml)')
+    parser.add_argument('--argmax', action='store_true',
+                        help='Force deterministic argmax action selection')
     args = parser.parse_args()
     backend = resolve_backend(args.device)
 
@@ -599,17 +611,21 @@ def main():
     if args.model and os.path.exists(args.model):
         logger.info(f"Loading model from {args.model}")
         model = MTGModel.load(args.model, device=backend.name)
+        model._loaded_from_path = args.model
     else:
         logger.info("Creating fresh model with random weights")
         model = MTGModel()
         model.to(backend.torch_device)
+        model._loaded_from_path = 'fresh_model'
 
     # Print parameter counts
     counts = model.count_parameters()
     logger.info(f"Model parameters: {counts}")
 
     # Start server
-    server = ModelServer(model, host=args.host, port=args.port, device=backend.torch_device)
+    server = ModelServer(model, host=args.host, port=args.port,
+                         device=backend.torch_device,
+                         use_argmax=args.argmax)
     server.start()
 
 

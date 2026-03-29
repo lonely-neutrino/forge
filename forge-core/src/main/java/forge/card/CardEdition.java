@@ -549,7 +549,8 @@ public final class CardEdition implements Comparable<CardEdition> {
             return null;
         }
 
-        Collections.shuffle(boosterTypes);
+        MyRandom.auditExternalRandomUsage("CardEdition.getRandomBoosterKind");
+        Collections.shuffle(boosterTypes, MyRandom.getRandom());
         return boosterTypes.get(0);
     }
 

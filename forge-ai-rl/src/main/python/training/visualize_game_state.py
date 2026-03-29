@@ -11,12 +11,12 @@ import sys
 import random
 from pathlib import Path
 
+sys.path.insert(0, os.path.dirname(
+    os.path.dirname(os.path.abspath(__file__))))
+
 import numpy as np
 import torch
 from model.backend import resolve_backend
-
-sys.path.insert(0, os.path.dirname(
-    os.path.dirname(os.path.abspath(__file__))))
 
 from model.mtg_model import MTGModel
 from training.mmap_dataset import parse_game_state, CARD_DIM, GLOBAL_DIM, ZONES_CONFIG
@@ -2416,10 +2416,356 @@ class GameStateViewer:
         self.pred_text.config(state=tk.DISABLED)
 
 
+def load_replay_runs(trace_dir, replay_id):
+    runs = {}
+    trace_path = Path(trace_dir)
+    if not trace_path.exists():
+        return runs
+
+    pattern = f"replay_{replay_id}_*.jsonl"
+    for path in trace_path.glob(pattern):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                lines = [json.loads(line) for line in f if line.strip()]
+        except Exception:
+            continue
+        if not lines:
+            continue
+        header = lines[0]
+        if header.get("recordType") != "header":
+            continue
+        key = (header.get("runLabel"), int(header.get("seatIndex", 1)))
+        runs[key] = {
+            "header": header,
+            "steps": [line for line in lines[1:]
+                      if line.get("recordType") == "step"],
+            "path": str(path),
+        }
+    return runs
+
+
+def summarize_zone_cards(zone, mask, limit=8):
+    cards = []
+    for row, present in zip(zone, mask):
+        if not present:
+            continue
+        card = decode_card(row)
+        if card is None:
+            continue
+        label = "/".join(card.get("types", [])) or "Card"
+        if card.get("power") is not None and card.get("toughness") is not None:
+            label += f" {card['power']}/{card['toughness']}"
+        if card.get("tapped"):
+            label += " tapped"
+        cards.append(label)
+        if len(cards) >= limit:
+            break
+    return cards
+
+
+def decode_snapshot_globals(global_features):
+    if len(global_features) < 2:
+        return None
+    return {
+        "my_life": int(round(global_features[0] * 50 - 10)),
+        "opp_life": int(round(global_features[1] * 50 - 10)),
+    }
+
+
+def format_snapshot_card(card):
+    if not card:
+        return "Card"
+    label = card.get("name") or "Card"
+    type_line = card.get("type")
+    basic_land_suffix = f"Basic Land - {label}"
+    if type_line and type_line != basic_land_suffix:
+        label += f" ({type_line})"
+    power = card.get("power")
+    toughness = card.get("toughness")
+    if power is not None and toughness is not None:
+        label += f" {power}/{toughness}"
+    flags = []
+    if card.get("tapped"):
+        flags.append("tapped")
+    if card.get("summoningSick"):
+        flags.append("summoning sick")
+    counters = card.get("counters")
+    if counters and counters != "{}":
+        flags.append(f"counters={counters}")
+    if flags:
+        label += " [" + ", ".join(flags) + "]"
+    return label
+
+
+def summarize_snapshot_payload(snapshot):
+    if not snapshot:
+        return None
+
+    sections = []
+    overview = [
+        f"My life: {snapshot.get('myLife', '?')} | Opp life: {snapshot.get('oppLife', '?')}",
+        f"My poison: {snapshot.get('myPoison', 0)} | Opp poison: {snapshot.get('oppPoison', 0)}",
+        f"My hand: {snapshot.get('myHandCount', 0)} | Opp hand: {snapshot.get('oppHandCount', 0)}",
+        f"My library: {snapshot.get('myLibraryCount', 0)} | Opp library: {snapshot.get('oppLibraryCount', 0)}",
+    ]
+    active = snapshot.get("activePlayer")
+    if active:
+        overview.append(f"Active player: {active}")
+    sections.append("\n".join(overview))
+
+    zone_specs = [
+        ("myBoard", "My board"),
+        ("oppBoard", "Opp board"),
+        ("hand", "Hand"),
+        ("myGraveyard", "My gy"),
+        ("oppGraveyard", "Opp gy"),
+    ]
+    for key, label in zone_specs:
+        cards = snapshot.get(key) or []
+        if cards:
+            sections.append(f"{label}: " + ", ".join(format_snapshot_card(card) for card in cards))
+        else:
+            sections.append(f"{label}: empty")
+
+    stack_items = snapshot.get("stack") or []
+    if stack_items:
+        sections.append("Stack: " + ", ".join(stack_items))
+    else:
+        sections.append("Stack: empty")
+    return "\n\n".join(sections)
+
+
+def summarize_snapshot(global_features, game_state_flat, snapshot=None):
+    rich_snapshot = summarize_snapshot_payload(snapshot)
+    if rich_snapshot:
+        return rich_snapshot
+
+    try:
+        gf = np.array(global_features, dtype=np.float32)
+        flat = np.array(game_state_flat, dtype=np.float32)
+        _, zones, masks = parse_game_state(flat, gf)
+    except Exception:
+        return "Snapshot unavailable"
+
+    sections = []
+    snapshot_globals = decode_snapshot_globals(gf)
+    if snapshot_globals:
+        sections.append(
+            f"My life: {snapshot_globals['my_life']} | Opp life: {snapshot_globals['opp_life']}"
+        )
+    zone_order = [
+        ("my_board", "My board"),
+        ("opp_board", "Opp board"),
+        ("hand", "Hand"),
+        ("my_gy", "My gy"),
+        ("opp_gy", "Opp gy"),
+        ("stack", "Stack"),
+    ]
+    for key, label in zone_order:
+        cards = summarize_zone_cards(zones[key], masks[f"{key}_mask"])
+        if cards:
+            sections.append(f"{label}: " + ", ".join(cards))
+        else:
+            sections.append(f"{label}: empty")
+    return "\n\n".join(sections)
+
+
+def first_divergence_index(left_steps, right_steps):
+    limit = min(len(left_steps), len(right_steps))
+    for idx in range(limit):
+        if left_steps[idx].get("decisionHash") != right_steps[idx].get("decisionHash"):
+            return idx
+    if len(left_steps) != len(right_steps):
+        return limit
+    return None
+
+
+class ReplayDiffViewer:
+    def __init__(self, root, trace_dir, replay_id, seat):
+        self.root = root
+        self.root.title(f"Replay Diff - {replay_id}")
+        runs = load_replay_runs(trace_dir, replay_id)
+        if not runs:
+            raise SystemExit(f"No replay traces found for replay_id={replay_id}")
+
+        self.left = runs.get(("baseline", seat))
+        self.right = runs.get(("compare", seat))
+        if self.left is None or self.right is None:
+            keys = sorted(runs.keys())
+            if len(keys) >= 2:
+                self.left = runs[keys[0]]
+                self.right = runs[keys[1]]
+            else:
+                raise SystemExit("Need two replay traces to compare")
+
+        self.left_steps = self.left["steps"]
+        self.right_steps = self.right["steps"]
+        self.max_idx = max(len(self.left_steps), len(self.right_steps)) - 1
+        self.idx = 0
+        self.divergence = first_divergence_index(self.left_steps, self.right_steps)
+        self._syncing_controls = False
+
+        top = ttk.Frame(root)
+        top.pack(fill="x", padx=8, pady=8)
+        ttk.Button(top, text="Prev", command=self.prev_step).pack(side="left")
+        ttk.Button(top, text="Next", command=self.next_step).pack(side="left")
+        ttk.Button(top, text="Jump Divergence",
+                   command=self.jump_divergence).pack(side="left", padx=6)
+        ttk.Label(top, text="Go to step:").pack(side="left", padx=(8, 2))
+        self.step_var = tk.StringVar(value="1")
+        step_entry = ttk.Entry(top, textvariable=self.step_var, width=8)
+        step_entry.pack(side="left")
+        step_entry.bind("<Return>", lambda _event: self.jump_to_step())
+        ttk.Button(top, text="Go", command=self.jump_to_step).pack(side="left", padx=(4, 8))
+        self.status = tk.StringVar()
+        ttk.Label(top, textvariable=self.status).pack(side="left", padx=10)
+
+        scrub = ttk.Frame(root)
+        scrub.pack(fill="x", padx=8, pady=(0, 8))
+        self.step_scale = tk.Scale(
+            scrub,
+            from_=1,
+            to=max(1, self.max_idx + 1),
+            orient=tk.HORIZONTAL,
+            showvalue=False,
+            resolution=1,
+            command=self.on_scale_change,
+        )
+        self.step_scale.pack(fill="x")
+
+        panes = ttk.Frame(root)
+        panes.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+        self.left_text = tk.Text(panes, width=80, height=40, wrap="word")
+        self.right_text = tk.Text(panes, width=80, height=40, wrap="word")
+        self.left_text.pack(side="left", fill="both", expand=True, padx=(0, 4))
+        self.right_text.pack(side="left", fill="both", expand=True, padx=(4, 0))
+        self.render()
+
+    def prev_step(self):
+        self.idx = max(0, self.idx - 1)
+        self.render()
+
+    def next_step(self):
+        self.idx = min(self.max_idx, self.idx + 1)
+        self.render()
+
+    def jump_divergence(self):
+        if self.divergence is not None:
+            self.idx = self.divergence
+            self.render()
+
+    def jump_to_step(self):
+        try:
+            requested = int(self.step_var.get())
+        except (TypeError, ValueError):
+            requested = self.idx + 1
+        self.idx = max(0, min(self.max_idx, requested - 1))
+        self.render()
+
+    def on_scale_change(self, value):
+        if self._syncing_controls:
+            return
+        try:
+            requested = int(float(value))
+        except (TypeError, ValueError):
+            return
+        self.idx = max(0, min(self.max_idx, requested - 1))
+        self.render()
+
+    def render(self):
+        left = self.left_steps[self.idx] if self.idx < len(self.left_steps) else None
+        right = self.right_steps[self.idx] if self.idx < len(self.right_steps) else None
+        hash_match = (left and right
+                      and left.get("stateHash") == right.get("stateHash")
+                      and left.get("decisionHash") == right.get("decisionHash"))
+        badge = "MATCH" if hash_match else "DIFF"
+        self.status.set(
+            f"Step {self.idx + 1}/{self.max_idx + 1} | First divergence: "
+            f"{'none' if self.divergence is None else self.divergence + 1} | {badge}"
+        )
+        self._syncing_controls = True
+        self.step_var.set(str(self.idx + 1))
+        self.step_scale.set(self.idx + 1)
+        self._syncing_controls = False
+        self._fill_text(self.left_text, self._render_step("Baseline", self.left["header"], left))
+        self._fill_text(self.right_text, self._render_step("Compare", self.right["header"], right))
+
+    def _fill_text(self, widget, content):
+        widget.config(state=tk.NORMAL)
+        widget.delete("1.0", tk.END)
+        widget.insert("1.0", content)
+        widget.config(state=tk.DISABLED)
+
+    def _render_step(self, title, header, step):
+        lines = [
+            title,
+            f"Actor: {header.get('actor')} (seat {header.get('seatIndex')})",
+            f"Policy: {header.get('policyMode')} via {header.get('backend')}",
+            f"Model: {header.get('modelId')}",
+            f"Deck: {header.get('playerDeck')}",
+            f"Opponent Deck: {header.get('opponentDeck')}",
+            "",
+        ]
+        if step is None:
+            lines.append("No step at this index")
+            return "\n".join(lines)
+
+        lines.extend([
+            f"Turn {step.get('turn')} | Phase {step.get('phase')}",
+            f"Decision: {step.get('decisionType')}",
+            f"Context: {step.get('contextInfo')}",
+            f"Selected: {', '.join(step.get('selectedLabels', [])) or step.get('selectedIndices')}",
+            f"Value estimate: {self._format_value(step.get('valueEstimate'))}",
+            f"State hash: {step.get('stateHash')}",
+            f"Decision hash: {step.get('decisionHash')}",
+            "",
+            "Candidates:",
+        ])
+        candidate_labels = step.get("traceCandidateLabels") or step.get("candidateLabels", [])
+        selected = set(step.get("selectedIndices", []))
+        for idx, label in enumerate(candidate_labels[:30]):
+            marker = "*" if idx in selected else " "
+            lines.append(f"{marker} [{idx}] {label}")
+        if len(candidate_labels) > 30:
+            lines.append(f"... {len(candidate_labels) - 30} more")
+        missing_selected = [
+            label for label in (step.get("selectedLabels", []) or [])
+            if label not in candidate_labels
+        ]
+        if missing_selected:
+            lines.append("")
+            lines.append("Selected outside raw candidates:")
+            for label in missing_selected:
+                lines.append(f"* {label}")
+        lines.extend([
+            "",
+            "Snapshot:",
+            summarize_snapshot(step.get("globalFeatures", []),
+                               step.get("gameStateFlat", []),
+                               step.get("snapshot")),
+        ])
+        return "\n".join(lines)
+
+    @staticmethod
+    def _format_value(value):
+        if value is None:
+            return "n/a"
+        try:
+            return f"{float(value):.3f}"
+        except (TypeError, ValueError):
+            return str(value)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--data-dir",
         default="../../rl_data/trajectories")
+    parser.add_argument("--replay-trace-dir",
+        default=None)
+    parser.add_argument("--replay-id",
+        default=None)
+    parser.add_argument("--seat", type=int,
+        default=1)
     parser.add_argument("--model",
         default="../../rl_data/checkpoints/"
                 "model_with_decisions.pt")
@@ -2427,6 +2773,12 @@ def main():
     parser.add_argument("--max-samples", type=int,
         default=500)
     args = parser.parse_args()
+    if args.replay_trace_dir and args.replay_id:
+        root = tk.Tk()
+        ReplayDiffViewer(root, args.replay_trace_dir,
+                         args.replay_id, args.seat)
+        root.mainloop()
+        return
 
     # Load both PPO and heuristic data — mode toggle switches between them
     print("Loading samples...", flush=True)

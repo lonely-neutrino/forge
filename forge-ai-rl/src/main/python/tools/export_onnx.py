@@ -68,10 +68,11 @@ class StateEncoderWrapper(nn.Module):
         def safe_forward(card_features, mask):
             x = cse.card_projection(card_features)
             # Ensure at least one mask entry is True per batch item
-            # by ORing the first position with True
-            first_col = torch.ones_like(mask[:, :1])
+            # by ORing the first position with True.
+            # Use boolean ops here because ONNX Runtime rejects Max(bool, bool).
+            first_col = torch.ones_like(mask[:, :1], dtype=torch.bool)
             safe_mask = torch.cat([
-                torch.max(mask[:, :1], first_col),
+                torch.logical_or(mask[:, :1], first_col),
                 mask[:, 1:]
             ], dim=1)
             attn_mask = ~safe_mask

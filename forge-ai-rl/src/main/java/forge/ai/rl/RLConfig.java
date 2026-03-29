@@ -21,9 +21,11 @@ public class RLConfig {
     // Training
     private RLModelMode mode = RLModelMode.HEURISTIC_FALLBACK;
     private boolean recordTrajectories = false;
+    private boolean zeroIntermediateReward = false;
     private String trajectoryOutputDir = "rl_data/trajectories";
     private String onnxModelDir = "rl_data/models";
     private String onnxExecutionProvider = "auto";
+    private ReplayConfig replayConfig;
 
     // Reward shaping
     private double winReward = 1.0;
@@ -62,12 +64,22 @@ public class RLConfig {
     public void setMode(RLModelMode mode) { this.mode = mode; }
     public boolean isRecordTrajectories() { return recordTrajectories; }
     public void setRecordTrajectories(boolean record) { this.recordTrajectories = record; }
+    public boolean isZeroIntermediateReward() { return zeroIntermediateReward; }
+    public void setZeroIntermediateReward(boolean zeroIntermediateReward) {
+        this.zeroIntermediateReward = zeroIntermediateReward;
+    }
     public String getTrajectoryOutputDir() { return trajectoryOutputDir; }
     public void setTrajectoryOutputDir(String dir) { this.trajectoryOutputDir = dir; }
     public String getOnnxModelDir() { return onnxModelDir; }
     public void setOnnxModelDir(String dir) { this.onnxModelDir = dir; }
     public String getOnnxExecutionProvider() { return onnxExecutionProvider; }
     public void setOnnxExecutionProvider(String provider) { this.onnxExecutionProvider = provider; }
+    public ReplayConfig getReplayConfig() { return replayConfig; }
+    public void setReplayConfig(ReplayConfig replayConfig) { this.replayConfig = replayConfig; }
+    public boolean isReplayMode() { return replayConfig != null; }
+    public boolean isDeterministicPolicyRequired() {
+        return replayConfig != null && replayConfig.isDeterministicPolicy();
+    }
 
     public double getWinReward() { return winReward; }
     public double getLoseReward() { return loseReward; }

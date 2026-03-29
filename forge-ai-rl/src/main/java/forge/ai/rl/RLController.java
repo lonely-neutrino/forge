@@ -19,6 +19,7 @@ import forge.game.zone.ZoneType;
 import org.tinylog.Logger;
 
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -46,6 +47,7 @@ public class RLController {
     private final ModelServerClient modelClient;
     private final ONNXModelClient onnxClient;
     private final TrajectoryRecorder trajectoryRecorder;
+    private final ReplayTraceRecorder replayTraceRecorder;
 
     private Player player;
     private Game game;
@@ -64,7 +66,12 @@ public class RLController {
         }
 
         this.trajectoryRecorder = config.isRecordTrajectories()
-                ? new TrajectoryRecorder(config.getTrajectoryOutputDir())
+                ? new TrajectoryRecorder(config.getTrajectoryOutputDir(),
+                config.isZeroIntermediateReward())
+                : null;
+        this.replayTraceRecorder = config.isReplayMode()
+                ? new ReplayTraceRecorder(config.getReplayConfig().getTraceOutputDir(),
+                config.getReplayConfig())
                 : null;
     }
 
@@ -113,6 +120,16 @@ public class RLController {
                             String opponentName,
                             String playerDeck,
                             String opponentDeck) {
+        onGameStart(gameId, matchId, playerName, opponentName, playerDeck, opponentDeck, -1);
+    }
+
+    public void onGameStart(String gameId,
+                            String matchId,
+                            String playerName,
+                            String opponentName,
+                            String playerDeck,
+                            String opponentDeck,
+                            int seatIndex) {
         if (trajectoryRecorder != null) {
             trajectoryRecorder.startGame(
                     gameId, matchId, playerName, opponentName,
@@ -120,6 +137,21 @@ public class RLController {
         }
         if (config.getMode() == RLModelMode.GRPC) {
             modelClient.connect();
+            if (config.isDeterministicPolicyRequired()) {
+                modelClient.ensureDeterministicReady();
+            }
+        }
+        if (replayTraceRecorder != null) {
+            replayTraceRecorder.start(
+                    playerName,
+                    seatIndex,
+                    opponentName,
+                    playerDeck,
+                    opponentDeck,
+                    config.getMode().name(),
+                    getBackendLabel(),
+                    getModelIdentifier(),
+                    config.isDeterministicPolicyRequired());
         }
     }
 
@@ -129,6 +161,10 @@ public class RLController {
     public void onGameEnd(boolean won) {
         if (trajectoryRecorder != null) {
             trajectoryRecorder.endGame(won);
+        }
+        if (replayTraceRecorder != null) {
+            replayTraceRecorder.finish(game, player, won);
+            replayTraceRecorder.close();
         }
     }
 
@@ -150,8 +186,10 @@ public class RLController {
         }
         candidates.add(ActionEncoder.encodePassAction()); // last index = pass
 
-        DecisionContext context = DecisionContext.singleSelect(
-                DecisionType.PRIORITY_ACTION, gameState, candidates, "priority_action");
+        DecisionContext context = new DecisionContext(
+                DecisionType.PRIORITY_ACTION, gameState, candidates,
+                describeSpellAbilities(availableActions, true),
+                1, 1, "priority_action", null);
 
         DecisionResult result = requestDecision(context);
         if (result == null) return -1; // fallback: pass
@@ -192,8 +230,9 @@ public class RLController {
         }
 
         DecisionContext context = new DecisionContext(
-                DecisionType.TARGET_SELECTION, gameState, candidates, min, max,
-                "target_selection", spellFeatures);
+                DecisionType.TARGET_SELECTION, gameState, candidates,
+                describeEntities(targets),
+                min, max, "target_selection", spellFeatures);
 
         DecisionResult result = requestDecision(context);
         if (result == null) return List.of(0); // fallback: first target
@@ -224,9 +263,10 @@ public class RLController {
         for (Card c : possibleAttackers) {
             candidates.add(forge.ai.rl.features.CardFeatures.encode(c, player));
         }
-        DecisionContext context = DecisionContext.multiSelect(
+        DecisionContext context = new DecisionContext(
                 DecisionType.DECLARE_ATTACKERS, gameState, candidates,
-                0, possibleAttackers.size(), "declare_attackers");
+                describeCards(possibleAttackers),
+                0, possibleAttackers.size(), "declare_attackers", null);
 
         DecisionResult result = requestDecision(context);
         if (result == null) {
@@ -289,9 +329,10 @@ public class RLController {
         // Add "no block" option
         candidates.add(new float[candidates.get(0).length]); // zero vector = no block
 
-        DecisionContext context = DecisionContext.multiSelect(
+        DecisionContext context = new DecisionContext(
                 DecisionType.DECLARE_BLOCKERS, gameState, candidates,
-                0, Math.min(possibleBlockers.size(), candidates.size()), "declare_blockers");
+                describeBlockPairs(possibleBlockers, attackers),
+                0, Math.min(possibleBlockers.size(), candidates.size()), "declare_blockers", null);
 
         DecisionResult result = requestDecision(context);
         if (result == null) {
@@ -335,8 +376,10 @@ public class RLController {
             candidateFeatures.add(forge.ai.rl.features.CardFeatures.encode(c, player));
             cardList.add(c);
         }
-        DecisionContext context = DecisionContext.multiSelect(
-                DecisionType.CARD_SELECTION, gameState, candidateFeatures, min, max, "card_selection");
+        DecisionContext context = new DecisionContext(
+                DecisionType.CARD_SELECTION, gameState, candidateFeatures,
+                describeCards(cardList),
+                min, max, "card_selection", null);
 
         DecisionResult result = requestDecision(context);
         if (result == null) {
@@ -354,7 +397,10 @@ public class RLController {
      */
     public boolean decideBinary(String contextInfo) {
         GameStateFeatures gameState = stateEncoder.encode(game, player);
-        DecisionContext context = DecisionContext.binary(gameState, contextInfo);
+        DecisionContext context = new DecisionContext(
+                DecisionType.BINARY_CHOICE, gameState, List.of(),
+                List.of("NO", "YES"),
+                1, 1, contextInfo, null);
 
         DecisionResult result = requestDecision(context);
         if (result == null) return false; // fallback: no
@@ -379,7 +425,8 @@ public class RLController {
 
         DecisionContext context = new DecisionContext(
                 DecisionType.MULLIGAN, gameState, candidates,
-                0, 0, "mulligan_keep_" + cardsToReturn);
+                List.of("MULLIGAN", "KEEP"),
+                0, 0, "mulligan_keep_" + cardsToReturn, null);
 
         DecisionResult result = requestDecision(context);
         if (result == null) return cardsToReturn <= 1; // fallback: keep if 0-1 cards to return
@@ -403,8 +450,10 @@ public class RLController {
             candidates.add(feat);
         }
 
-        DecisionContext context = DecisionContext.singleSelect(
-                DecisionType.CATEGORICAL_CHOICE, gameState, candidates, contextInfo);
+        DecisionContext context = new DecisionContext(
+                DecisionType.CATEGORICAL_CHOICE, gameState, candidates,
+                describeNumbers(min, max),
+                1, 1, contextInfo, null);
 
         DecisionResult result = requestDecision(context);
         if (result == null) return min; // fallback: minimum
@@ -437,13 +486,16 @@ public class RLController {
      * state representation as live inference.
      */
     public void recordHeuristicAttack(List<Card> possibleAttackers, List<Integer> selectedIndices) {
-        if (trajectoryRecorder == null || cachedPreDecisionState == null) return;
+        if ((trajectoryRecorder == null && replayTraceRecorder == null)
+                || cachedPreDecisionState == null) return;
 
-        DecisionContext context = DecisionContext.multiSelect(
+        DecisionContext context = new DecisionContext(
                 DecisionType.DECLARE_ATTACKERS, cachedPreDecisionState,
                 cachedCandidateFeatures,
+                describeCards(possibleAttackers),
                 0, possibleAttackers.size(),
-                "attack_" + selectedIndices.size() + "_of_" + possibleAttackers.size());
+                "attack_" + selectedIndices.size() + "_of_" + possibleAttackers.size(),
+                null);
 
         DecisionResult result = new DecisionResult(
                 selectedIndices, new float[0], 0f, true);
@@ -457,14 +509,17 @@ public class RLController {
      * Record the heuristic's block decision paired with the pre-decision state.
      */
     public void recordHeuristicBlock(List<Card> possibleBlockers, List<Integer> selectedIndices) {
-        if (trajectoryRecorder == null || cachedPreDecisionState == null) return;
+        if ((trajectoryRecorder == null && replayTraceRecorder == null)
+                || cachedPreDecisionState == null) return;
 
-        DecisionContext context = DecisionContext.multiSelect(
+        DecisionContext context = new DecisionContext(
                 DecisionType.DECLARE_BLOCKERS, cachedPreDecisionState,
                 cachedCandidateFeatures,
+                describeCards(possibleBlockers),
                 0, Math.min(possibleBlockers.size(),
                     cachedCandidateFeatures.size()),
-                "block_" + selectedIndices.size());
+                "block_" + selectedIndices.size(),
+                null);
 
         DecisionResult result = new DecisionResult(
                 selectedIndices, new float[0], 0f, true);
@@ -484,7 +539,8 @@ public class RLController {
     public void recordHeuristicBlockAssignment(
             List<Card> possibleBlockers, List<Card> attackers,
             forge.game.combat.Combat combat) {
-        if (trajectoryRecorder == null || cachedPreDecisionState == null) return;
+        if ((trajectoryRecorder == null && replayTraceRecorder == null)
+                || cachedPreDecisionState == null) return;
 
         // Pre-encode and enrich all blockers and attackers with combat math
         List<float[]> blockerFeats = new ArrayList<>();
@@ -529,15 +585,17 @@ public class RLController {
             }
         }
 
-        DecisionContext context = DecisionContext.multiSelect(
+        DecisionContext context = new DecisionContext(
                 DecisionType.DECLARE_BLOCKERS, cachedPreDecisionState,
                 candidates.isEmpty() ? cachedCandidateFeatures : candidates,
+                describeBlockPairs(possibleBlockers, attackers),
                 0, Math.min(possibleBlockers.size(),
                     candidates.isEmpty() ? cachedCandidateFeatures.size()
                         : candidates.size()),
                 "block_assign_" + selectedIndices.size()
                     + "_of_" + possibleBlockers.size()
-                    + "x" + attackers.size());
+                    + "x" + attackers.size(),
+                null);
 
         DecisionResult result = new DecisionResult(
                 selectedIndices, new float[0], 0f, true);
@@ -554,7 +612,7 @@ public class RLController {
      * @param chosenSa the spell the heuristic chose, or null for pass
      */
     public void recordHeuristicPriority(List<SpellAbility> availableActions, SpellAbility chosenSa) {
-        if (trajectoryRecorder == null) return;
+        if (trajectoryRecorder == null && replayTraceRecorder == null) return;
         // Only record when there's at least 1 spell option (+ pass = 2 candidates)
         if (availableActions.isEmpty()) return;
 
@@ -593,9 +651,12 @@ public class RLController {
             }
         }
 
-        DecisionContext context = DecisionContext.singleSelect(
+        DecisionContext context = new DecisionContext(
                 DecisionType.PRIORITY_ACTION, gameState, candidates,
-                "priority_" + availableActions.size() + "_options");
+                describeSpellAbilities(availableActions, true),
+                1, 1,
+                "priority_" + availableActions.size() + "_options",
+                null);
 
         DecisionResult result = new DecisionResult(
                 List.of(selectedIdx), new float[0], 0f, true);
@@ -627,18 +688,23 @@ public class RLController {
     }
 
     private void recordDecision(DecisionContext context, DecisionResult result) {
-        if (trajectoryRecorder == null || result == null) return;
+        if ((trajectoryRecorder == null && replayTraceRecorder == null) || result == null) return;
 
         Player opp = player.getWeakestOpponent();
-        trajectoryRecorder.recordDecision(
-                context, result,
-                player.getLife(),
-                opp != null ? opp.getLife() : 0,
-                player.getCardsIn(ZoneType.Hand).size(),
-                opp != null ? opp.getCardsIn(ZoneType.Hand).size() : 0,
-                countCreatures(player),
-                opp != null ? countCreatures(opp) : 0
-        );
+        if (trajectoryRecorder != null) {
+            trajectoryRecorder.recordDecision(
+                    context, result,
+                    player.getLife(),
+                    opp != null ? opp.getLife() : 0,
+                    player.getCardsIn(ZoneType.Hand).size(),
+                    opp != null ? opp.getCardsIn(ZoneType.Hand).size() : 0,
+                    countCreatures(player),
+                    opp != null ? countCreatures(opp) : 0
+            );
+        }
+        if (replayTraceRecorder != null) {
+            replayTraceRecorder.record(game, player, context, result);
+        }
     }
 
     private int countCreatures(Player p) {
@@ -658,21 +724,46 @@ public class RLController {
                                       List<Integer> selected,
                                       List<float[]> candidateFeats,
                                       String info) {
-        recordDecisionDirect(type, numCandidates, selected, candidateFeats, info, null);
+        recordDecisionDirect(type, numCandidates, selected, candidateFeats, List.of(), info, null);
     }
 
     public void recordDecisionDirect(DecisionType type,
                                       int numCandidates,
                                       List<Integer> selected,
                                       List<float[]> candidateFeats,
+                                      List<String> candidateLabels,
+                                      String info) {
+        recordDecisionDirect(type, numCandidates, selected, candidateFeats,
+                candidateLabels, info, null);
+    }
+
+    public void recordDecisionDirect(DecisionType type,
+                                      int numCandidates,
+                                      List<Integer> selected,
+                                      List<float[]> candidateFeats,
+                                      List<String> candidateLabels,
                                       String info,
                                       float[] spellFeatures) {
-        if (trajectoryRecorder == null) return;
+        recordDecisionDirect(type, numCandidates, selected, candidateFeats,
+                candidateLabels, candidateLabels, info, spellFeatures);
+    }
+
+    public void recordDecisionDirect(DecisionType type,
+                                      int numCandidates,
+                                      List<Integer> selected,
+                                      List<float[]> candidateFeats,
+                                      List<String> candidateLabels,
+                                      List<String> traceCandidateLabels,
+                                      String info,
+                                      float[] spellFeatures) {
+        if (trajectoryRecorder == null && replayTraceRecorder == null) return;
         try {
             GameStateFeatures gs = stateEncoder.encode(game, player);
             DecisionContext ctx = new DecisionContext(
                     type, gs,
                     candidateFeats != null ? candidateFeats : List.of(),
+                    candidateLabels,
+                    traceCandidateLabels,
                     selected.size(), numCandidates, info, spellFeatures);
             boolean isFallback = config.getMode() != RLModelMode.GRPC
                     && config.getMode() != RLModelMode.ONNX;
@@ -682,5 +773,92 @@ public class RLController {
         } catch (Exception e) {
             // Never crash the game due to recording errors
         }
+    }
+
+    public void recordDecisionDirect(DecisionType type,
+                                      int numCandidates,
+                                      List<Integer> selected,
+                                      List<float[]> candidateFeats,
+                                      String info,
+                                      float[] spellFeatures) {
+        recordDecisionDirect(type, numCandidates, selected, candidateFeats,
+                List.of(), info, spellFeatures);
+    }
+
+    private String getBackendLabel() {
+        switch (config.getMode()) {
+            case ONNX:
+                return "onnx";
+            case GRPC:
+                return "grpc";
+            case RECORD_HEURISTIC:
+            case HEURISTIC_FALLBACK:
+            default:
+                return "heuristic";
+        }
+    }
+
+    private String getModelIdentifier() {
+        switch (config.getMode()) {
+            case ONNX:
+                return config.getOnnxModelDir();
+            case GRPC:
+                ModelServerClient.ServerMetadata metadata = modelClient.getCachedMetadata();
+                return metadata != null ? metadata.modelId : config.getGrpcHost() + ":" + config.getGrpcPort();
+            case RECORD_HEURISTIC:
+            case HEURISTIC_FALLBACK:
+            default:
+                return "heuristic";
+        }
+    }
+
+    private static List<String> describeCards(Collection<Card> cards) {
+        List<String> labels = new ArrayList<>();
+        for (Card card : cards) {
+            labels.add(card.getName());
+        }
+        return labels;
+    }
+
+    private static List<String> describeEntities(Collection<? extends GameEntity> entities) {
+        List<String> labels = new ArrayList<>();
+        for (GameEntity entity : entities) {
+            labels.add(entity.toString());
+        }
+        return labels;
+    }
+
+    private static List<String> describeSpellAbilities(List<SpellAbility> spells, boolean includePass) {
+        List<String> labels = new ArrayList<>();
+        for (SpellAbility sa : spells) {
+            String name = sa.getHostCard() != null ? sa.getHostCard().getName() : "Spell";
+            String api = sa.getApi() != null ? sa.getApi().name() : "None";
+            labels.add(name + " [" + api + "]");
+        }
+        if (includePass) {
+            labels.add("PASS");
+        }
+        return labels;
+    }
+
+    private static List<String> describeBlockPairs(List<Card> blockers, List<Card> attackers) {
+        List<String> labels = new ArrayList<>();
+        for (Card blocker : blockers) {
+            for (Card attacker : attackers) {
+                labels.add(blocker.getName() + " -> " + attacker.getName());
+            }
+        }
+        if (!labels.isEmpty()) {
+            labels.add("NO_BLOCK");
+        }
+        return labels;
+    }
+
+    private static List<String> describeNumbers(int min, int max) {
+        List<String> labels = new ArrayList<>();
+        for (int i = min; i <= max; i++) {
+            labels.add(String.valueOf(i));
+        }
+        return labels;
     }
 }

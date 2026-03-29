@@ -50,7 +50,8 @@ public class RecordingControllerAi extends PlayerControllerAi {
         super(game, p, lp);
         this.encoder = new GameStateEncoder(config);
         this.recorder = new TrajectoryRecorder(
-                config.getTrajectoryOutputDir());
+                config.getTrajectoryOutputDir(),
+                config.isZeroIntermediateReward());
     }
 
     public TrajectoryRecorder getRecorder() {

@@ -59,7 +59,8 @@ public class RecordingPlayerController extends PlayerController {
         this.delegate = delegate;
         this.encoder = new GameStateEncoder(config);
         this.recorder = new TrajectoryRecorder(
-                config.getTrajectoryOutputDir());
+                config.getTrajectoryOutputDir(),
+                config.isZeroIntermediateReward());
     }
 
     /** Call once at game start. */

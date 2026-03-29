@@ -25,6 +25,7 @@ import java.util.UUID;
 public class TrajectoryRecorder {
     private static final String METADATA_FILENAME = "game_metadata.jsonl";
     private final String outputDir;
+    private final boolean zeroIntermediateReward;
     private final Gson gson;
     private final List<DecisionRecord> currentGame;
     private String gameId;
@@ -41,7 +42,13 @@ public class TrajectoryRecorder {
     private int prevBoardAdvantage = 0;
 
     public TrajectoryRecorder(String outputDir) {
+        this(outputDir, false);
+    }
+
+    public TrajectoryRecorder(String outputDir,
+                              boolean zeroIntermediateReward) {
         this.outputDir = outputDir;
+        this.zeroIntermediateReward = zeroIntermediateReward;
         this.gson = new GsonBuilder().create();
         this.currentGame = new ArrayList<>();
 
@@ -99,16 +106,23 @@ public class TrajectoryRecorder {
         record.actionProbabilities = result.getActionProbabilities();
         record.valueEstimate = result.getValueEstimate();
         record.usedFallback = result.isUsedFallback();
+        record.source = result.isUsedFallback() ? "heuristic" : "ppo";
+        record.modelSelectedIndices = result.getSelectedIndices();
+        record.counterfactualHeuristicAvailable = false;
 
         // Compute intermediate reward from state changes
         int lifeAdv = myLife - oppLife;
         int cardAdv = myHandSize - oppHandSize;
         int boardAdv = myCreatureCount - oppCreatureCount;
 
-        record.intermediateReward = 0;
-        record.intermediateReward += (lifeAdv - prevLifeAdvantage) * 0.01;
-        record.intermediateReward += (cardAdv - prevCardAdvantage) * 0.05;
-        record.intermediateReward += (boardAdv - prevBoardAdvantage) * 0.02;
+        if (zeroIntermediateReward) {
+            record.intermediateReward = 0.0;
+        } else {
+            record.intermediateReward = 0;
+            record.intermediateReward += (lifeAdv - prevLifeAdvantage) * 0.01;
+            record.intermediateReward += (cardAdv - prevCardAdvantage) * 0.05;
+            record.intermediateReward += (boardAdv - prevBoardAdvantage) * 0.02;
+        }
 
         prevLifeAdvantage = lifeAdv;
         prevCardAdvantage = cardAdv;
@@ -124,6 +138,22 @@ public class TrajectoryRecorder {
         record.spellFeatures = context.getSpellFeatures();
 
         currentGame.add(record);
+    }
+
+    /**
+     * Attach analysis-only heuristic counterfactual data to the last recorded
+     * decision. This is used by tests and downstream analysis tooling; it does
+     * not change the selected action for training.
+     */
+    public void annotateLastDecisionWithHeuristicCounterfactual(
+            List<Integer> heuristicSelectedIndices) {
+        if (currentGame.isEmpty()) {
+            return;
+        }
+        DecisionRecord record = currentGame.get(currentGame.size() - 1);
+        record.counterfactualHeuristicAvailable = true;
+        record.counterfactualLabelSource = "shadow_heuristic";
+        record.counterfactualHeuristicSelectedIndices = heuristicSelectedIndices;
     }
 
     /**
@@ -233,14 +263,19 @@ public class TrajectoryRecorder {
         int turnIndex;
         String decisionType;
         String contextInfo;
+        String source;
         float[] globalFeatures;
         float[] gameStateFlat;
         float[][] candidateFeatures;
         int candidateCount;
         List<Integer> selectedIndices;
+        List<Integer> modelSelectedIndices;
         float[] actionProbabilities;
         float valueEstimate;
         boolean usedFallback;
+        boolean counterfactualHeuristicAvailable;
+        String counterfactualLabelSource;
+        List<Integer> counterfactualHeuristicSelectedIndices;
         double intermediateReward;
         double terminalReward;
         float[] spellFeatures; // 64-dim source spell for target decisions

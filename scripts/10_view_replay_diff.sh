@@ -1,14 +1,15 @@
 #!/bin/bash
-# Step 2: Collect trajectory data + preprocess with live dashboard
-# Usage: ./02_collect_data.sh [games] [--clean] [--zero-intermediate-reward] [--deck "Deck Name.dck"...]
-#   --clean: delete old trajectories and preprocessed data first
-#   --zero-intermediate-reward: record intermediateReward as 0.0 in trajectory JSONL
+# Step 10: Open the side-by-side replay diff viewer
+# Usage:
+#   sh 10_view_replay_diff.sh [replay_id] [trace_dir] [seat]
 set -e
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 PYTHON_DIR="$PROJECT_ROOT/forge-ai-rl/src/main/python"
 VENV_PY="$PROJECT_ROOT/forge-ai-rl/venv/bin/python3"
 VENV_PY_WIN="$PROJECT_ROOT/forge-ai-rl/venv/Scripts/python.exe"
+
 if command -v cygpath >/dev/null 2>&1; then
     USERPROFILE_UNIX="$(cygpath "$USERPROFILE" 2>/dev/null || printf '%s' "$USERPROFILE")"
     CONDA_PREFIX_UNIX="$(cygpath "$CONDA_PREFIX" 2>/dev/null || printf '%s' "$CONDA_PREFIX")"
@@ -16,6 +17,7 @@ else
     USERPROFILE_UNIX="$USERPROFILE"
     CONDA_PREFIX_UNIX="$CONDA_PREFIX"
 fi
+
 CONDA_PY="$CONDA_PREFIX_UNIX/python"
 CONDA_PY_WIN="$CONDA_PREFIX_UNIX/python.exe"
 FORGE_RL_CONDA_WIN="$USERPROFILE_UNIX/anaconda3/envs/forge_rl/python.exe"
@@ -39,35 +41,32 @@ else
     exit 1
 fi
 
+normalize_path() {
+    local path="$1"
+    if [ -z "$path" ]; then
+        printf '%s' "$path"
+        return
+    fi
+    if [[ "$PYTHON" == *.exe ]] && command -v cygpath >/dev/null 2>&1; then
+        cygpath -m "$path" 2>/dev/null || printf '%s' "$path"
+    else
+        printf '%s' "$path"
+    fi
+}
+
+REPLAY_ID="${1:-demo_seed_12345}"
+TRACE_DIR="${2:-$PROJECT_ROOT/rl_data/replays}"
+SEAT="${3:-1}"
+
+TRACE_DIR_PY="$(normalize_path "$TRACE_DIR")"
+
+echo "Opening replay diff viewer..."
+echo "  Replay ID: $REPLAY_ID"
+echo "  Trace dir: $TRACE_DIR"
+echo "  Seat: $SEAT"
+
 cd "$PYTHON_DIR"
-
-GAMES=1000
-if [ $# -gt 0 ] && [[ "$1" != --* ]]; then
-    GAMES="$1"
-    shift
-fi
-
-EXTRA_ARGS=()
-while [ $# -gt 0 ]; do
-    case "$1" in
-        --deck)
-            if [ -z "$2" ]; then
-                echo "Missing deck name after --deck"
-                exit 1
-            fi
-            EXTRA_ARGS+=("$1" "$2")
-            shift 2
-            ;;
-        --zero-intermediate-reward)
-            EXTRA_ARGS+=("$1")
-            shift
-            ;;
-        *)
-            EXTRA_ARGS+=("$1")
-            shift
-            ;;
-    esac
-done
-
-echo "Launching collection dashboard for $GAMES games..."
-"$PYTHON" training/collect_ui.py --games "$GAMES" "${EXTRA_ARGS[@]}"
+"$PYTHON" training/visualize_game_state.py \
+  --replay-trace-dir "$TRACE_DIR_PY" \
+  --replay-id "$REPLAY_ID" \
+  --seat "$SEAT"

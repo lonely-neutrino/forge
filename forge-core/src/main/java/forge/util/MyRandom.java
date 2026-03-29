@@ -63,6 +63,10 @@ public class MyRandom {
         MyRandom.random = random;
     }
 
+    public static void auditExternalRandomUsage(String source) {
+        ReplayRandom.audit(source);
+    }
+
     public static int[] splitIntoRandomGroups(final int value, final int numGroups) {
         int[] groups = new int[numGroups];
         

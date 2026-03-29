@@ -12,6 +12,8 @@ public class DecisionContext {
     private final DecisionType type;
     private final GameStateFeatures gameState;
     private final List<float[]> candidateFeatures; // feature vector per candidate option
+    private final List<String> candidateLabels;
+    private final List<String> traceCandidateLabels;
     private final int minSelections;
     private final int maxSelections;
     private final String contextInfo; // human-readable description for logging
@@ -20,15 +22,35 @@ public class DecisionContext {
     public DecisionContext(DecisionType type, GameStateFeatures gameState,
                            List<float[]> candidateFeatures, int minSelections,
                            int maxSelections, String contextInfo) {
-        this(type, gameState, candidateFeatures, minSelections, maxSelections, contextInfo, null);
+        this(type, gameState, candidateFeatures, List.of(), minSelections, maxSelections, contextInfo, null);
     }
 
     public DecisionContext(DecisionType type, GameStateFeatures gameState,
                            List<float[]> candidateFeatures, int minSelections,
                            int maxSelections, String contextInfo, float[] spellFeatures) {
+        this(type, gameState, candidateFeatures, List.of(), minSelections, maxSelections, contextInfo, spellFeatures);
+    }
+
+    public DecisionContext(DecisionType type, GameStateFeatures gameState,
+                           List<float[]> candidateFeatures,
+                           List<String> candidateLabels,
+                           int minSelections,
+                           int maxSelections, String contextInfo, float[] spellFeatures) {
+        this(type, gameState, candidateFeatures, candidateLabels, candidateLabels,
+                minSelections, maxSelections, contextInfo, spellFeatures);
+    }
+
+    public DecisionContext(DecisionType type, GameStateFeatures gameState,
+                           List<float[]> candidateFeatures,
+                           List<String> candidateLabels,
+                           List<String> traceCandidateLabels,
+                           int minSelections,
+                           int maxSelections, String contextInfo, float[] spellFeatures) {
         this.type = type;
         this.gameState = gameState;
         this.candidateFeatures = candidateFeatures;
+        this.candidateLabels = candidateLabels != null ? candidateLabels : List.of();
+        this.traceCandidateLabels = traceCandidateLabels != null ? traceCandidateLabels : this.candidateLabels;
         this.minSelections = minSelections;
         this.maxSelections = maxSelections;
         this.contextInfo = contextInfo;
@@ -38,6 +60,8 @@ public class DecisionContext {
     public DecisionType getType() { return type; }
     public GameStateFeatures getGameState() { return gameState; }
     public List<float[]> getCandidateFeatures() { return candidateFeatures; }
+    public List<String> getCandidateLabels() { return candidateLabels; }
+    public List<String> getTraceCandidateLabels() { return traceCandidateLabels; }
     public int getMinSelections() { return minSelections; }
     public int getMaxSelections() { return maxSelections; }
     public String getContextInfo() { return contextInfo; }

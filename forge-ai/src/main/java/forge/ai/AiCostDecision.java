@@ -16,6 +16,7 @@ import forge.game.spellability.SpellAbility;
 import forge.game.spellability.SpellAbilityStackInstance;
 import forge.game.zone.ZoneType;
 import forge.util.Aggregates;
+import forge.util.MyRandom;
 import forge.util.TextUtil;
 import forge.util.collect.FCollectionView;
 
@@ -176,7 +177,8 @@ public class AiCostDecision extends CostDecisionMakerBase {
         List<Player> res = cost.getPotentialPlayers(player, ability);
         // I should only choose one of these right?
         // TODO Choose the "worst" player.
-        Collections.shuffle(res);
+        MyRandom.auditExternalRandomUsage("AiCostDecision.visit.CostPromiseGift");
+        Collections.shuffle(res, MyRandom.getRandom());
 
         return PaymentDecision.players(res.subList(0, 1));
     }
