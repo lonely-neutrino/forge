@@ -394,6 +394,63 @@ value network simultaneously.
 4. ⬜ PPO with improved encoder + hyperparameters
 5. ⬜ Self-play if PPO vs heuristic plateaus again
 
+### Phase 3c: Expert Iteration via MCTS Rollouts (2026-03-29) 🔄 IN PROGRESS
+
+PPO plateaued at 27-36% win rate across multiple attempts (vs heuristic, self-play, league play).
+The core issue: stochastic sampling degrades play quality, and sparse terminal rewards can't provide
+per-decision credit assignment at our compute scale.
+
+Expert Iteration (ExIt) sidesteps this entirely: use **Monte Carlo rollouts** to find better moves
+than the current policy at each decision point, then train supervised on the search-improved decisions.
+
+**Implementation: `MCTSDecisionMaker.java`**
+
+Core MCTS with UCB1 rollout allocation:
+1. At each priority decision: expand all (spell, target) pairs as candidates
+2. Allocate a fixed rollout budget (default 30) via UCB1: promising candidates get more rollouts,
+   unpromising ones are naturally pruned
+3. Each rollout: copy game via `GameCopier`, apply the candidate action via `GameSimulator`,
+   play the rest to completion with heuristic AIs (simulation disabled for speed)
+4. Record visit-count-based policy (AlphaZero-style soft targets) and win rates
+
+**Decision types with MCTS:**
+- **Priority**: Full UCB1 search across spell+target pairs. Targeted spells are expanded:
+  e.g., Path to Exile → Creature A and Path to Exile → Creature B are separate candidates.
+- **Attack**: Patterns evaluated: no attack, all-in, each individual creature.
+- **Target selection**: UCB1 across all legal targets when called standalone.
+- **Mulligan**: Compare "keep this hand" rollouts vs "shuffle and draw N-1" rollouts
+  using GameCopier (required PhaseHandler fix for pre-game state copying).
+- **Block/Card selection/Binary**: Heuristic decides, recorded for training.
+
+**Key engineering fixes:**
+- Fixed `PhaseHandler.devModeSet` null guard to allow `GameCopier.makeCopy()` during mulligan
+- Disabled `USE_SIMULATION` on rollout game copies to prevent nested simulation (300x speedup)
+- `GameSimulator.simulateSpellAbility()` used for proper target copying in rollouts
+- Temporary target injection on original SA for targeted spell rollouts (saved/restored)
+- UCB1 exploration constant C=√2 for theoretical optimum exploration/exploitation
+
+**Data recording:**
+- `actionProbabilities` = per-candidate win rates (Q-values)
+- `visitProportions` = per-candidate UCB1 visit fractions (search policy, AlphaZero-style)
+- `valueEstimate` = win rate of selected candidate
+- TARGET_SELECTION records include per-target win rates from priority search
+
+**Performance:**
+- ~5-15 minutes per game with 30 rollout budget (vs ~0.5s for heuristic collection)
+- 4 parallel threads on 16-core machine
+- 20 games = ~1-3 hours
+- Budget primarily spent on priority decisions (most candidates)
+
+**Training pipeline:**
+- MCTS trajectories use same JSONL format as heuristic/PPO trajectories
+- Existing `04_train_decisions.sh` trains on MCTS data directly
+- Model learns to predict what MCTS chose (search-improved policy distillation)
+- Iterate: better model → better value network → can replace rollouts with V(s') later
+
+**Scripts:**
+- `scripts/09_exit_collect.sh [games] [rollouts]` — MCTS data collection
+- Existing training pipeline processes the output directly
+
 ### Phase 4: RL Training — Full Complexity (weeks 15-22)
 1. Train on full card pools (Standard, Modern, or curated sets)
 2. Implement league training with exploiter agents

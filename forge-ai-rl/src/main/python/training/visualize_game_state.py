@@ -81,6 +81,69 @@ LAND_COLORS = {
 }
 
 
+def _is_player_target(feats):
+    """Detect if a 256-dim candidate is a player target (not a card).
+    Player targets are encoded by ActionEncoder.encodeTarget() as 64-dim
+    padded to 256: [life, poison, hand_size, creature_count, 1.0, 0...]
+    The player flag at index 4 is 1.0, and the rest (indices 5-255) are 0."""
+    if len(feats) < 10:
+        return False
+    # Player flag at index 4
+    if feats[4] < 0.5:
+        return False
+    # Real cards have type flags at [0-6] that are exactly 0 or 1;
+    # player targets have normalized life/poison at [0-1] which are
+    # fractional. Check that indices 5-13 are near zero (no card
+    # color/type data) and index 4 is the player flag.
+    has_no_colors = all(abs(feats[i]) < 0.1 for i in range(7, 13))
+    has_no_keywords = all(abs(feats[i]) < 0.1 for i in range(29, 40))
+    return has_no_colors and has_no_keywords
+
+
+def _decode_player_target(feats):
+    """Decode a player target encoded by ActionEncoder.encodeTarget().
+    Layout: [0]=life, [1]=poison, [2]=hand_size, [3]=creature_count, [4]=1.0"""
+    life = int(round(feats[0] * 50 - 10))  # normalized [-10, 40]
+    poison = int(round(feats[1] * 10))
+    hand = int(round(feats[2] * 15))
+    creatures = int(round(feats[3] * 20))
+
+    label = f"Player ({life} life)"
+    if poison > 0:
+        label += f", {poison} poison"
+
+    return {
+        "types": ["Player"],
+        "colors": [],
+        "cmc": 0,
+        "power": None,
+        "toughness": None,
+        "loyalty": None,
+        "tapped": False,
+        "sick": False,
+        "attacking": False,
+        "blocking": False,
+        "face_down": False,
+        "keywords": [],
+        "zone": None,
+        "primary_api": None,
+        "secondary_api": None,
+        "label": label,
+        "detail": f"Hand: {hand}, Creatures: {creatures}",
+        "p1p1": 0,
+        "m1m1": 0,
+        "loyalty_counters": 0,
+        "charge_counters": 0,
+        "other_counters": 0,
+        "attachments": 0,
+        "damage": 0,
+        "produces_mana": [],
+        "cost_str": "",
+        "cost_total": 0,
+        "triggers": [],
+    }
+
+
 def decode_card(feats):
     """Decode a 256-dim CardFeatures vector.
 
@@ -334,8 +397,8 @@ def decode_card(feats):
     combat_trig_magnitude = round(feats[197] * 20) if len(feats) > 197 and feats[197] > 0 else 0
 
     # === PUMP MAGNITUDE [200-201] ===
-    pump_power = round(feats[200] * 25 - 5) if len(feats) > 200 and feats[200] > 0 else None
-    pump_toughness = round(feats[201] * 25 - 5) if len(feats) > 201 and feats[201] > 0 else None
+    pump_power = round(feats[200] * 20) if len(feats) > 200 and feats[200] > 0 else None
+    pump_toughness = round(feats[201] * 20) if len(feats) > 201 and feats[201] > 0 else None
 
     # === AURA/EQUIPMENT HOST [202-207] ===
     is_attached = feats[202] > 0.5 if len(feats) > 202 else False
@@ -489,15 +552,19 @@ def decode_action(feats):
     if len(feats) < 18:
         return None
 
-    # Check pass action (feature[63] = 1.0)
+    # Check pass action: feature[63] = 1.0 AND no card type/color
+    # flags set (indices 0-12 all zero). This distinguishes from
+    # removal spells where [63] = removal_kills_biggest = 1.0.
     if len(feats) > 63 and feats[63] > 0.5:
-        return {"label": "PASS", "is_pass": True,
-                "types": [], "colors": [], "cmc": 0,
-                "sa_type": "pass", "api": None,
-                "targets": False, "detail": "",
-                "damage": 0, "cards_drawn": 0,
-                "power": None, "toughness": None,
-                "target_info": ""}
+        has_type_or_color = any(feats[i] > 0.3 for i in range(13))
+        if not has_type_or_color:
+            return {"label": "PASS", "is_pass": True,
+                    "types": [], "colors": [], "cmc": 0,
+                    "sa_type": "pass", "api": None,
+                    "targets": False, "detail": "",
+                    "damage": 0, "cards_drawn": 0,
+                    "power": None, "toughness": None,
+                    "target_info": ""}
 
     type_names = ["Creature", "Instant", "Sorcery",
                   "Enchantment", "Artifact", "Planeswalker",
@@ -553,8 +620,10 @@ def decode_action(feats):
     # Target polarity [56-59]
     can_target_own_creature = feats[56] > 0.5 if len(feats) > 56 else False
     can_target_opp_creature = feats[57] > 0.5 if len(feats) > 57 else False
-    can_target_own_player = feats[58] > 0.5 if len(feats) > 58 else False
-    can_target_opp_player = feats[59] > 0.5 if len(feats) > 59 else False
+    can_target_players = feats[58] > 0.5 if len(feats) > 58 else False
+    # [59] is duplicate of [58] in Java encoder
+    can_target_own_player = can_target_players
+    can_target_opp_player = can_target_players
 
     # Build target description with polarity
     target_parts = []
@@ -836,8 +905,11 @@ def _load_fonts():
     return font_sm, font_md, font_lg
 
 
-def draw_card_image(info, highlight=None):
-    """Draw a card as PIL image in MTG card style."""
+def draw_card_image(info, highlight=None, win_rate=None,
+                    visit_prop=None):
+    """Draw a card as PIL image in MTG card style.
+    win_rate: MCTS rollout win rate (0-1) or None.
+    visit_prop: MCTS visit proportion (0-1) or None."""
     if not HAS_PIL:
         return None
 
@@ -1049,6 +1121,28 @@ def draw_card_image(info, highlight=None):
         draw.text((7, CARD_H-17), str(cmc),
                   fill="#ffffff", font=font_lg)
 
+    # MCTS overlay (above P/T box)
+    if win_rate is not None or visit_prop is not None:
+        has_pt = info.get("power") is not None
+        base_y = (CARD_H - 22) if has_pt else (CARD_H - 4)
+        n_lines = (1 if win_rate is not None else 0) \
+                + (1 if visit_prop is not None else 0)
+        oy = base_y - n_lines * 11
+        draw.rectangle([CARD_W-52, oy,
+                        CARD_W-4, base_y],
+                       fill="#000000")
+        ty = oy + 1
+        if win_rate is not None:
+            wr_color = _wr_color(win_rate)
+            draw.text((CARD_W-50, ty),
+                      f"Q:{win_rate*100:.0f}%",
+                      fill=wr_color, font=font_sm)
+            ty += 10
+        if visit_prop is not None:
+            draw.text((CARD_W-50, ty),
+                      f"V:{visit_prop*100:.0f}%",
+                      fill="#89b4fa", font=font_sm)
+
     return img
 
 
@@ -1059,9 +1153,23 @@ def _darken(hex_color, factor):
     return f"#{int(r*factor):02x}{int(g*factor):02x}{int(b*factor):02x}"
 
 
+def _wr_color(wr):
+    """Color for a win rate: red(0%) → yellow(50%) → green(100%)."""
+    if wr <= 0.5:
+        r = 255
+        g = int(255 * wr * 2)
+    else:
+        r = int(255 * (1 - wr) * 2)
+        g = 255
+    return f"#{r:02x}{g:02x}40"
+
+
 def draw_action_card_image(info, is_chosen=False,
-                           is_pass=False):
-    """Draw a priority action candidate as a card."""
+                           is_pass=False, win_rate=None,
+                           visit_prop=None):
+    """Draw a priority action candidate as a card.
+    win_rate: MCTS rollout win rate (0-1) or None.
+    visit_prop: MCTS visit proportion (0-1) or None."""
     if not HAS_PIL:
         return None
 
@@ -1080,11 +1188,24 @@ def draw_action_card_image(info, is_chosen=False,
                 "DejaVuSansMono-Bold.ttf", 14)
         except (IOError, OSError):
             font = ImageFont.load_default()
-        d.text((ACTION_W//2, ACTION_H//2 - 8), "PASS",
+        d.text((ACTION_W//2, ACTION_H//2 - 18), "PASS",
                fill="#f9e2af" if is_chosen else "#6c7086",
                font=font, anchor='mt')
+        y_off = -2
+        if win_rate is not None:
+            wr_color = (_wr_color(win_rate)
+                        if win_rate > 0 else "#6c7086")
+            d.text((ACTION_W//2, ACTION_H//2 + y_off),
+                   f"Q:{win_rate*100:.0f}%",
+                   fill=wr_color, font=font, anchor='mt')
+            y_off += 14
+        if visit_prop is not None:
+            d.text((ACTION_W//2, ACTION_H//2 + y_off),
+                   f"V:{visit_prop*100:.0f}%",
+                   fill="#89b4fa", font=font, anchor='mt')
+            y_off += 14
         if is_chosen:
-            d.text((ACTION_W//2, ACTION_H//2 + 12),
+            d.text((ACTION_W//2, ACTION_H//2 + y_off),
                    "CHOSEN",
                    fill="#a6e3a1", font=font, anchor='mt')
         return img
@@ -1186,9 +1307,23 @@ def draw_action_card_image(info, is_chosen=False,
         d.text((bx+3, by+1), pt,
                fill="#ffffff", font=font_lg)
 
+    # MCTS stats
+    stat_y = ACTION_H - 14
+    if visit_prop is not None:
+        d.text((4, stat_y - 10),
+               f"V:{visit_prop*100:.0f}%",
+               fill="#89b4fa", font=font_sm)
+        stat_y -= 10
+    if win_rate is not None:
+        wr_color = _wr_color(win_rate)
+        d.text((4, stat_y - 10),
+               f"Q:{win_rate*100:.0f}%",
+               fill=wr_color, font=font_sm)
+        stat_y -= 10
+
     # "CHOSEN" marker
     if is_chosen:
-        d.text((4, ACTION_H - 16), ">> CHOSEN",
+        d.text((4, ACTION_H - 14), ">> CHOSEN",
                fill="#a6e3a1", font=font_md)
 
     return img
@@ -1201,9 +1336,9 @@ def load_samples(data_dir, max_samples=500,
     path = Path(data_dir)
     files = sorted(path.glob("traj_*.jsonl"))
     if rl_only:
-        # Only load RL player trajectories
+        # Only load RL/MCTS player trajectories
         files = [f for f in files
-                 if '_RL_' in f.name]
+                 if '_RL_' in f.name or '_MCTS_' in f.name]
     random.shuffle(files)
 
     samples = []
@@ -1246,6 +1381,12 @@ def load_samples(data_dir, max_samples=500,
                     "candidates": cand,
                     "selected": rec.get(
                         "selectedIndices", []),
+                    "action_probs": rec.get(
+                        "actionProbabilities", []),
+                    "visit_props": rec.get(
+                        "visitProportions", []),
+                    "value_estimate": rec.get(
+                        "valueEstimate", 0.0),
                     "won": won,
                     "source": source_tag,
                 })
@@ -1262,6 +1403,7 @@ class GameStateViewer:
     # Viewing modes
     MODE_RL_REPLAY = "rl_replay"        # PPO trajectories — RL decisions at collection time
     MODE_HEURISTIC = "heuristic"        # Base trajectories — heuristic decisions
+    MODE_EXIT = "exit"                  # ExIt trajectories — MCTS search-improved decisions
 
     def __init__(self, root, samples, model, device,
                  model_path=None, data_dir=None):
@@ -1277,9 +1419,11 @@ class GameStateViewer:
         self._pending_show = None  # for buffered updates
 
         # Determine initial mode from data
+        has_exit = any(s.get("source") == "exit" for s in samples)
         has_rl = any(s.get("source") == "ppo" for s in samples)
-        has_heur = any(s.get("source") == "heuristic" for s in samples)
-        self.mode = self.MODE_RL_REPLAY if has_rl else self.MODE_HEURISTIC
+        self.mode = (self.MODE_EXIT if has_exit
+                     else self.MODE_RL_REPLAY if has_rl
+                     else self.MODE_HEURISTIC)
 
         root.title("MTG RL — Game State Visualizer")
         root.geometry("1500x950")
@@ -1461,18 +1605,26 @@ class GameStateViewer:
                  anchor="w").pack(fill=tk.X, padx=5)
 
     def _toggle_mode(self):
-        """Switch between RL Replay and Heuristic Analysis modes."""
-        if self.mode == self.MODE_RL_REPLAY:
-            self.mode = self.MODE_HEURISTIC
-        else:
-            self.mode = self.MODE_RL_REPLAY
+        """Cycle through viewing modes."""
+        modes = [self.MODE_EXIT, self.MODE_RL_REPLAY,
+                 self.MODE_HEURISTIC]
+        try:
+            idx = modes.index(self.mode)
+            self.mode = modes[(idx + 1) % len(modes)]
+        except ValueError:
+            self.mode = modes[0]
         self._apply_mode_filter()
         if self.samples:
             self._show()
 
     def _apply_mode_filter(self):
         """Filter samples to current mode and update mode indicator."""
-        if self.mode == self.MODE_RL_REPLAY:
+        if self.mode == self.MODE_EXIT:
+            filtered = [s for s in self.all_samples
+                        if s.get("source") == "exit"]
+            self.mode_v.set("ExIt MCTS")
+            self.mode_lbl.configure(fg="#cba6f7", bg="#2a2040")
+        elif self.mode == self.MODE_RL_REPLAY:
             filtered = [s for s in self.all_samples
                         if s.get("source") == "ppo"]
             self.mode_v.set("RL REPLAY")
@@ -1493,21 +1645,30 @@ class GameStateViewer:
 
     def _get_choice_label(self):
         """Label for the recorded choice based on mode."""
-        if self.mode == self.MODE_RL_REPLAY:
+        if self.mode == self.MODE_EXIT:
+            return "MCTS chose"
+        elif self.mode == self.MODE_RL_REPLAY:
             return "RL chose"
         else:
             return "Heuristic"
 
     def _get_compare_label(self):
         """Label for the model comparison based on mode."""
-        if self.mode == self.MODE_RL_REPLAY:
+        if self.mode == self.MODE_EXIT:
+            return "Current model"
+        elif self.mode == self.MODE_RL_REPLAY:
             return "Current model"
         else:
             return "Model would"
 
     def _mode_samples(self):
         """Get samples for the current mode."""
-        tag = "ppo" if self.mode == self.MODE_RL_REPLAY else "heuristic"
+        tag_map = {
+            self.MODE_EXIT: "exit",
+            self.MODE_RL_REPLAY: "ppo",
+            self.MODE_HEURISTIC: "heuristic",
+        }
+        tag = tag_map.get(self.mode, "heuristic")
         filtered = [s for s in self.all_samples
                     if s.get("source") == tag]
         return filtered if filtered else self.all_samples
@@ -1717,24 +1878,25 @@ class GameStateViewer:
         """Reload trajectory data from disk."""
         if not self.data_dir:
             return
-        # Also check PPO trajectories
+        # Also check PPO and ExIt trajectories
         dirs = [self.data_dir]
-        ppo_dir = os.path.join(
-            os.path.dirname(self.data_dir),
-            'ppo_trajectories')
-        if os.path.isdir(ppo_dir):
-            dirs.append(ppo_dir)
-        ppo_eval = ppo_dir + '_eval'
-        if os.path.isdir(ppo_eval):
-            dirs.append(ppo_eval)
+        base = os.path.dirname(self.data_dir)
+        for subdir in ['ppo_trajectories', 'ppo_trajectories_eval',
+                        'exit_trajectories']:
+            d = os.path.join(base, subdir)
+            if os.path.isdir(d):
+                dirs.append(d)
 
         all_samples = []
         for d in dirs:
             is_ppo = 'ppo' in d
-            tag = "ppo" if is_ppo else "heuristic"
+            is_exit = 'exit' in d
+            tag = ("exit" if is_exit
+                   else "ppo" if is_ppo
+                   else "heuristic")
             all_samples.extend(
                 load_samples(d, max_samples=100,
-                             rl_only=is_ppo,
+                             rl_only=(is_ppo or is_exit),
                              source_tag=tag))
         if all_samples:
             self.all_samples = all_samples
@@ -1784,7 +1946,9 @@ class GameStateViewer:
             "BINARY_CHOICE": "BINARY",
         }
         self.type_v.set(type_labels.get(dt, dt))
-        self.info_v.set(s["info"])
+        source = s.get("source", "")
+        source_tag = f" [{source.upper()}]" if source else ""
+        self.info_v.set(s["info"] + source_tag)
         won = s["won"]
         self.outcome_v.set("WON" if won else "LOST")
         self.outcome_lbl.configure(fg="#a6e3a1" if won else "#f38ba8")
@@ -1859,10 +2023,23 @@ class GameStateViewer:
         for i in selected:
             cand_highlights[i] = "attack"
 
+        # Per-creature MCTS win rates and visit props for attack decisions
+        creature_wr = None
+        creature_vp = None
+        dt = s.get("type", "")
+        if dt == "DECLARE_ATTACKERS":
+            action_probs = s.get("action_probs", [])
+            visit_props = s.get("visit_props", [])
+            if action_probs:
+                creature_wr = action_probs
+            if visit_props:
+                creature_vp = visit_props
+
         opp_creature_imgs = self._pre_render_cards(opp_creatures)
         opp_land_imgs = self._pre_render_cards(opp_lands)
         my_creature_imgs = self._pre_render_cards(
-            my_creatures, candidate_highlights=cand_highlights)
+            my_creatures, candidate_highlights=cand_highlights,
+            win_rates=creature_wr, visit_props=creature_vp)
         my_land_imgs = self._pre_render_cards(my_lands)
         hand_imgs = self._pre_render_cards(hand)
         stack_imgs = self._pre_render_cards(
@@ -1885,7 +2062,8 @@ class GameStateViewer:
         # Model prediction
         self._predict(s)
 
-    def _pre_render_cards(self, cards, candidate_highlights=None):
+    def _pre_render_cards(self, cards, candidate_highlights=None,
+                          win_rates=None, visit_props=None):
         """Render card images off-screen, return list of PIL images."""
         if not HAS_PIL or not cards:
             return []
@@ -1894,7 +2072,15 @@ class GameStateViewer:
             hl = None
             if candidate_highlights and i in candidate_highlights:
                 hl = candidate_highlights[i]
-            images.append(draw_card_image(info, highlight=hl))
+            wr = None
+            if win_rates and i < len(win_rates):
+                wr = win_rates[i]
+            vp = None
+            if visit_props and i < len(visit_props):
+                vp = visit_props[i]
+            images.append(draw_card_image(info, highlight=hl,
+                                          win_rate=wr,
+                                          visit_prop=vp))
         return images
 
     def _pre_render_priority(self, s):
@@ -1906,19 +2092,32 @@ class GameStateViewer:
         if dt in ("TARGET_SELECTION", "CARD_SELECTION", "MULLIGAN"):
             candidates = s.get("candidates", [])
             selected = set(s.get("selected", []))
+            action_probs = s.get("action_probs", [])
+            visit_props = s.get("visit_props", [])
             images = []
             for i, cf in enumerate(candidates):
-                info = decode_card(cf)
+                if _is_player_target(cf):
+                    info = _decode_player_target(cf)
+                else:
+                    info = decode_card(cf)
                 if not info:
                     images.append(None)
                     continue
                 hl = "attack" if i in selected else None
-                images.append(draw_card_image(info, highlight=hl))
+                wr = (action_probs[i]
+                      if i < len(action_probs) else None)
+                vp = (visit_props[i]
+                      if i < len(visit_props) else None)
+                images.append(draw_card_image(
+                    info, highlight=hl, win_rate=wr,
+                    visit_prop=vp))
             return images if images else None
         if dt != "PRIORITY_ACTION":
             return None
         candidates = s.get("candidates", [])
         selected = s.get("selected", [])
+        action_probs = s.get("action_probs", [])
+        visit_props = s.get("visit_props", [])
         sel_idx = selected[0] if selected else -1
         images = []
         for i, cf in enumerate(candidates):
@@ -1928,8 +2127,13 @@ class GameStateViewer:
                 continue
             is_chosen = (i == sel_idx)
             is_pass = info.get("is_pass", False)
+            wr = (action_probs[i]
+                  if i < len(action_probs) else None)
+            vp = (visit_props[i]
+                  if i < len(visit_props) else None)
             images.append(draw_action_card_image(
-                info, is_chosen=is_chosen, is_pass=is_pass))
+                info, is_chosen=is_chosen, is_pass=is_pass,
+                win_rate=wr, visit_prop=vp))
         return images
 
     def _apply_cards(self, frame, images, cards, photos_out,
@@ -2041,7 +2245,9 @@ class GameStateViewer:
                                     fg="#a6e3a1")
 
     def _predict(self, s):
-        if self.mode == self.MODE_RL_REPLAY:
+        if self.mode == self.MODE_EXIT:
+            self.pred_title_v.set("MCTS Search vs Model")
+        elif self.mode == self.MODE_RL_REPLAY:
             self.pred_title_v.set("Current Model vs RL Policy")
         else:
             self.pred_title_v.set("Model vs Heuristic")
@@ -2083,6 +2289,44 @@ class GameStateViewer:
             self._update_eval_bar(value)
 
             lines = []
+
+            # MCTS rollout info (ExIt trajectories)
+            action_probs = s.get("action_probs", [])
+            visit_props = s.get("visit_props", [])
+            mcts_value = s.get("value_estimate", 0.0)
+            has_mcts = (action_probs and any(
+                p > 0 for p in action_probs)) or (
+                visit_props and any(
+                    p > 0 for p in visit_props))
+            if has_mcts:
+                lines.append("=== MCTS Search ===")
+                lines.append(
+                    f"Value: {mcts_value:.1%} win rate")
+                lines.append("")
+                # Header
+                has_vp = bool(visit_props)
+                hdr = f"  {'':>4} {'WinRate':>8}"
+                if has_vp:
+                    hdr += f" {'Visits':>8}"
+                lines.append(hdr)
+                lines.append(f"  {'':>4} {'-------':>8}"
+                    + (f" {'-------':>8}" if has_vp
+                       else ""))
+                n = max(len(action_probs),
+                        len(visit_props))
+                for i in range(n):
+                    marker = " <<" if i in s.get(
+                        "selected", []) else ""
+                    wr = (f"{action_probs[i]*100:5.1f}%"
+                          if i < len(action_probs)
+                          else "    -")
+                    vp = ""
+                    if has_vp and i < len(visit_props):
+                        vp = f" {visit_props[i]*100:5.1f}%"
+                    lines.append(
+                        f"  [{i}] {wr}{vp}{marker}")
+                lines.append("")
+
             lines.append(f"Win probability: {(value+1)/2:.0%}")
             lines.append(f"Value: {value:+.3f}")
             lines.append("")

@@ -14,5 +14,8 @@ public enum RLModelMode {
     HEURISTIC_FALLBACK,
 
     /** Record trajectories from heuristic AI decisions (imitation learning data collection) */
-    RECORD_HEURISTIC
+    RECORD_HEURISTIC,
+
+    /** Use MCTS rollouts to find best action at each decision point (ExIt data collection) */
+    MCTS
 }

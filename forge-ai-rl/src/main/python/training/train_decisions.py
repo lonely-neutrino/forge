@@ -739,7 +739,7 @@ def main():
     else:
         print(f'  No checkpoint found, using random init',
               flush=True)
-        model = MTGModel().to(device)
+        model = MTGModel.from_size("xl").to(device)
 
     heads = args.heads.split(',')
 

@@ -1429,7 +1429,7 @@ def main():
     else:
         print('  No checkpoint, using random init',
               flush=True)
-        model = MTGModel().to(device)
+        model = MTGModel.from_size('xl').to(device)
 
     # Unfreeze everything for PPO
     for p in model.parameters():

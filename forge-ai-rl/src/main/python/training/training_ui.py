@@ -303,7 +303,8 @@ def trainer_thread(state: TrainingState, args):
             pin_memory=backend.pin_memory)
 
         # Model
-        model = MTGModel().to(device)
+        model_size = getattr(args, 'model_size', 'xl')
+        model = MTGModel.from_size(model_size).to(device)
         state.model_params = model.count_parameters()['total']
 
         optimizer = optim.AdamW(
@@ -735,6 +736,10 @@ def main():
     parser.add_argument('--device', default=None)
     parser.add_argument('--max-files', type=int,
         default=None)
+    parser.add_argument('--model-size', default='xl',
+        choices=['small', 'medium', 'large', 'xl'],
+        help='Model size: small (512/23M), medium '
+             '(768/45M), large (1024/73M), xl (1024/107M)')
     args = parser.parse_args()
 
     # Shared state

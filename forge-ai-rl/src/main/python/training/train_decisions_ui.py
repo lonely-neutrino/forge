@@ -2217,8 +2217,9 @@ def trainer_thread(state, args):
                 args.encoder_checkpoint, device=backend.name)
             log(state, "Encoder loaded.")
         else:
-            log(state, "No checkpoint — random init")
-            model = MTGModel().to(device)
+            model_size = getattr(args, 'model_size', 'xl')
+            log(state, f"No checkpoint — init {model_size}")
+            model = MTGModel.from_size(model_size).to(device)
 
         state.encoder_params = sum(
             p.numel()
@@ -2685,6 +2686,10 @@ def main():
     parser.add_argument('--joint', action='store_true',
         help='Train all heads jointly with unfrozen '
              'encoder')
+    parser.add_argument('--model-size', default='xl',
+        choices=['small', 'medium', 'large', 'xl'],
+        help='Model size: small (512/23M), medium '
+             '(768/45M), large (1024/73M), xl (1024/107M)')
     args = parser.parse_args()
 
     state = TrainingState()

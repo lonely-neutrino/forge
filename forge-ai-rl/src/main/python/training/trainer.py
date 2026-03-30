@@ -309,7 +309,7 @@ def main():
     logger.info(f"Estimated VRAM: {mem['total_gb']:.2f} GB")
 
     # Create model
-    model = MTGModel()
+    model = MTGModel.from_size("xl")
     counts = model.count_parameters()
     logger.info(f"Model parameters: {counts['total']:,}")
 

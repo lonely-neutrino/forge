@@ -17,6 +17,19 @@ from .mulligan_head import MulliganHead
 from .binary_head import BinaryHead
 
 
+# Pre-defined model size configurations
+MODEL_SIZES = {
+    'small': dict(state_dim=512, hidden_dim=256, zone_embed_dim=128,
+                  num_heads=4, num_layers=2),
+    'medium': dict(state_dim=768, hidden_dim=384, zone_embed_dim=128,
+                   num_heads=8, num_layers=3),
+    'large': dict(state_dim=1024, hidden_dim=512, zone_embed_dim=128,
+                  num_heads=8, num_layers=3),
+    'xl': dict(state_dim=1024, hidden_dim=512, zone_embed_dim=256,
+               num_heads=8, num_layers=4),
+}
+
+
 class MTGModel(nn.Module):
     """
     Complete MTG RL model with shared game state encoder and specialized decision heads.
@@ -34,9 +47,9 @@ class MTGModel(nn.Module):
     """
 
     def __init__(self, global_feature_dim: int = 96, card_feature_dim: int = 256,
-                 action_feature_dim: int = 64, state_dim: int = 512,
-                 hidden_dim: int = 256, zone_embed_dim: int = 128,
-                 num_heads: int = 4, num_layers: int = 2, dropout: float = 0.1):
+                 action_feature_dim: int = 64, state_dim: int = 1024,
+                 hidden_dim: int = 512, zone_embed_dim: int = 256,
+                 num_heads: int = 8, num_layers: int = 4, dropout: float = 0.1):
         super().__init__()
 
         # Shared encoder
@@ -93,6 +106,18 @@ class MTGModel(nn.Module):
             'config': self.config,
             'state_dict': self.state_dict(),
         }, path)
+
+    @classmethod
+    def from_size(cls, size: str = 'xl', **overrides) -> 'MTGModel':
+        """Create a model from a named size preset.
+        Available sizes: small (512/11M), medium (768/45M),
+        large (1024/73M), xl (1024/107M)."""
+        if size not in MODEL_SIZES:
+            raise ValueError(f"Unknown model size '{size}'. "
+                             f"Available: {list(MODEL_SIZES.keys())}")
+        config = dict(MODEL_SIZES[size])
+        config.update(overrides)
+        return cls(**config)
 
     @classmethod
     def load(cls, path: str, device: str = 'cpu') -> 'MTGModel':

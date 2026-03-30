@@ -614,7 +614,7 @@ def main():
         model._loaded_from_path = args.model
     else:
         logger.info("Creating fresh model with random weights")
-        model = MTGModel()
+        model = MTGModel.from_size("xl")
         model.to(backend.torch_device)
         model._loaded_from_path = 'fresh_model'
 

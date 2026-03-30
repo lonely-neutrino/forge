@@ -8,14 +8,22 @@ import java.util.List;
  */
 public class DecisionResult {
     private final List<Integer> selectedIndices;
-    private final float[] actionProbabilities;
+    private final float[] actionProbabilities;  // win rates / Q-values
+    private final float[] visitProportions;     // UCB1 visit fractions (search policy)
     private final float valueEstimate;
-    private final boolean usedFallback; // true if heuristic AI was used instead of model
+    private final boolean usedFallback;
 
     public DecisionResult(List<Integer> selectedIndices, float[] actionProbabilities,
                           float valueEstimate, boolean usedFallback) {
+        this(selectedIndices, actionProbabilities, null, valueEstimate, usedFallback);
+    }
+
+    public DecisionResult(List<Integer> selectedIndices, float[] actionProbabilities,
+                          float[] visitProportions,
+                          float valueEstimate, boolean usedFallback) {
         this.selectedIndices = selectedIndices;
         this.actionProbabilities = actionProbabilities;
+        this.visitProportions = visitProportions;
         this.valueEstimate = valueEstimate;
         this.usedFallback = usedFallback;
     }
@@ -23,6 +31,7 @@ public class DecisionResult {
     public List<Integer> getSelectedIndices() { return selectedIndices; }
     public int getSelectedIndex() { return selectedIndices.isEmpty() ? -1 : selectedIndices.get(0); }
     public float[] getActionProbabilities() { return actionProbabilities; }
+    public float[] getVisitProportions() { return visitProportions; }
     public float getValueEstimate() { return valueEstimate; }
     public boolean isUsedFallback() { return usedFallback; }
 

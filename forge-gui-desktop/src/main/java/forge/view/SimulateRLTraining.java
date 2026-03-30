@@ -190,6 +190,11 @@ public class SimulateRLTraining {
             case "leagueplay":
                 runLeaguePlayMode(decks, nGames, timeout, outputDir, quiet, grpcHost, grpcPorts, grpcPorts2, threads);
                 break;
+            case "mcts-collect":
+                int rollouts = params.containsKey("r")
+                        ? Integer.parseInt(params.get("r").get(0)) : 5;
+                runMCTSCollectionMode(decks, nGames, timeout, outputDir, quiet, threads, rollouts);
+                break;
             case "headtohead":
                 if (onnxDir1 == null || onnxDir2 == null) {
                     System.out.println("Head-to-head requires -m1 <model_dir> -m2 <model_dir>");
@@ -636,6 +641,87 @@ public class SimulateRLTraining {
     }
 
     /**
+     * MCTS collection mode: play games with rollout-based search at each decision point.
+     * Produces search-improved training data for Expert Iteration (ExIt).
+     * Uses fewer threads since each game is much slower (rollouts at every decision).
+     */
+    private static void runMCTSCollectionMode(List<Deck> decks, int nGames, int timeout,
+                                               String outputDir, boolean quiet,
+                                               int threads, int rollouts) {
+        // Cap threads for MCTS — each game is CPU-intensive due to rollouts
+        int mctsThreads = threads;
+        System.out.println("=== MCTS Collection Mode (" + mctsThreads + " threads, "
+                + rollouts + " rollouts/candidate) ===");
+
+        AtomicInteger completed = new AtomicInteger(0);
+        long startTime = System.currentTimeMillis();
+
+        java.util.concurrent.ExecutorService executor =
+                java.util.concurrent.Executors.newFixedThreadPool(mctsThreads);
+        List<java.util.concurrent.Future<?>> futures = new ArrayList<>();
+
+        java.util.Random deckRng = new java.util.Random();
+        for (int i = 0; i < nGames; i++) {
+            final int gameIdx = i;
+            final Deck deck1 = decks.get(deckRng.nextInt(decks.size()));
+            final Deck deck2 = decks.get(deckRng.nextInt(decks.size()));
+            final boolean p1First = (i % 2 == 0);
+
+            futures.add(executor.submit(() -> {
+                // Player 1: MCTS-guided RL (records trajectories)
+                RLConfig mctsConfig = new RLConfig();
+                mctsConfig.setMode(RLModelMode.MCTS);
+                mctsConfig.setMctsRollouts(rollouts);
+                mctsConfig.setRecordTrajectories(true);
+                mctsConfig.setTrajectoryOutputDir(outputDir);
+
+                // Player 2: Heuristic AI (no recording)
+                RLConfig heuristicConfig = new RLConfig();
+                heuristicConfig.setMode(RLModelMode.HEURISTIC_FALLBACK);
+                heuristicConfig.setRecordTrajectories(false);
+
+                try {
+                    GameResult result;
+                    if (p1First) {
+                        result = runSingleGame(deck1, deck2, mctsConfig, heuristicConfig,
+                                "MCTS_" + gameIdx, "Heuristic_" + gameIdx, timeout, true);
+                    } else {
+                        result = runSingleGame(deck2, deck1, heuristicConfig, mctsConfig,
+                                "Heuristic_" + gameIdx, "MCTS_" + gameIdx, timeout, true);
+                    }
+
+                    int done = completed.incrementAndGet();
+                    if (!quiet && (done % 5 == 0 || done == nGames)) {
+                        long elapsed = System.currentTimeMillis() - startTime;
+                        double gps = done * 1000.0 / elapsed;
+                        System.out.printf("Game %d/%d [%.2f games/min]%n",
+                                done, nGames, gps * 60);
+                        System.out.flush();
+                    }
+                } catch (Exception e) {
+                    System.out.printf("Game %d FAILED: %s%n", gameIdx, e.getMessage());
+                    completed.incrementAndGet();
+                }
+            }));
+        }
+
+        for (java.util.concurrent.Future<?> f : futures) {
+            try {
+                // MCTS games are slow — generous timeout
+                f.get(timeout * 10L, TimeUnit.SECONDS);
+            } catch (Exception e) {
+                f.cancel(true);
+            }
+        }
+        executor.shutdown();
+
+        long totalTime = System.currentTimeMillis() - startTime;
+        System.out.printf("MCTS collection complete: %d games in %.1f minutes%n",
+                completed.get(), totalTime / 60000.0);
+        System.out.println("Trajectories saved to: " + outputDir);
+    }
+
+    /**
      * Head-to-head mode: two ONNX models play against each other.
      * Usage: rltrain headtohead -m1 path/to/model1 -m2 path/to/model2 -d deck1.dck -d deck2.dck -n 100
      */
@@ -871,13 +957,16 @@ public class SimulateRLTraining {
         }
 
         // Finalize RLController trajectory recorders
+        boolean isTimeout = game.getOutcome() == null
+                || game.getOutcome().isDraw();
         for (Player p : lobbyToPlayer.values()) {
             if (p.getController() instanceof PlayerControllerRL) {
-                RegisteredPlayer rp = p.getRegisteredPlayer();
-                boolean won = game.getOutcome() != null
-                        && !game.getOutcome().isDraw()
-                        && rp != null
-                        && game.getOutcome().isWinner(rp);
+                boolean won = false;
+                if (!isTimeout) {
+                    RegisteredPlayer rp = p.getRegisteredPlayer();
+                    won = rp != null
+                            && game.getOutcome().isWinner(rp);
+                }
                 ((PlayerControllerRL) p.getController())
                     .getRLController()
                     .onGameEnd(won);

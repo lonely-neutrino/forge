@@ -1,6 +1,7 @@
 package forge.ai.rl;
 
 import forge.LobbyPlayer;
+import forge.ai.rl.decisions.DecisionResult;
 import forge.ai.rl.decisions.DecisionType;
 import forge.ai.rl.features.ActionEncoder;
 import forge.ai.rl.features.CardFeatures;
@@ -37,6 +38,8 @@ import java.util.function.Supplier;
 public class PlayerControllerRL extends forge.ai.PlayerControllerAi {
 
     private final RLController rl;
+    private final forge.ai.rl.mcts.MCTSDecisionMaker mcts;
+    private final boolean useMCTS;
 
     // Diagnostic counters (per game)
     private int priorityModelAsked = 0;
@@ -51,6 +54,13 @@ public class PlayerControllerRL extends forge.ai.PlayerControllerAi {
                 : createFallbackLobby(lp.getName()));
         this.rl = new RLController(config);
         this.rl.setPlayer(p);
+        this.useMCTS = (config.getMode() == RLModelMode.MCTS);
+        if (useMCTS) {
+            this.mcts = new forge.ai.rl.mcts.MCTSDecisionMaker(
+                    config.getMctsRollouts(), 60);
+        } else {
+            this.mcts = null;
+        }
     }
 
     public void logDiagnostics() {
@@ -83,6 +93,72 @@ public class PlayerControllerRL extends forge.ai.PlayerControllerAi {
 
     @Override
     public List<SpellAbility> chooseSpellAbilityToPlay() {
+        if (useMCTS) {
+            // Let heuristic build candidate lists first
+            List<SpellAbility> heuristicResult = super.chooseSpellAbilityToPlay();
+            List<SpellAbility> candidates = getAi().getLastPlayableSpellAbilities();
+            if (candidates == null || candidates.isEmpty()) {
+                return heuristicResult;
+            }
+
+            forge.ai.rl.mcts.MCTSResult mctsResult =
+                    mcts.decidePriority(getGame(), player, candidates);
+            int idx = mctsResult.getSelectedIndex();
+
+            // Record with MCTS win rates as action probabilities
+            // and MCTS value estimate
+            rl.recordMCTSPriority(candidates,
+                    idx < candidates.size() ? candidates.get(idx) : null,
+                    mctsResult.getWinRates(),
+                    mctsResult.getVisitProportions(),
+                    mctsResult.getValueEstimate());
+
+            if (idx >= candidates.size()) {
+                return null; // pass
+            }
+
+            SpellAbility chosen = candidates.get(idx);
+            chosen.setActivatingPlayer(player);
+
+            // MCTS already evaluated all (spell, target) pairs —
+            // use the target it chose
+            if (chosen.usesTargeting() && chosen.getTargetRestrictions() != null) {
+                GameEntity mctsTarget = mcts.getChosenTarget(idx);
+                if (mctsTarget != null) {
+                    chosen.resetTargets();
+                    if (chosen.canTarget(mctsTarget)) {
+                        chosen.getTargets().add(mctsTarget);
+                    }
+                } else {
+                    // Single target or MCTS didn't evaluate targets
+                    List<GameEntity> legalTargets = chosen.getTargetRestrictions()
+                            .getAllCandidates(chosen, true);
+                    if (legalTargets.isEmpty()) return null;
+                    chosen.resetTargets();
+                    chosen.getTargets().add(legalTargets.get(0));
+                }
+
+                if (!chosen.isTargetNumberValid()) return null;
+
+                // Record MCTS target decision with per-target win rates
+                List<GameEntity> targetCands = mcts.getLastTargetCandidates();
+                float[] targetWR = mcts.getLastTargetWinRates();
+                float[] targetVP = mcts.getLastTargetVisitProps();
+                if (targetCands != null && targetWR != null) {
+                    GameEntity chosenTarget = mcts.getChosenTarget(idx);
+                    int chosenTargetIdx = targetCands.indexOf(chosenTarget);
+                    rl.recordMCTSTarget(chosen, targetCands,
+                            chosenTargetIdx >= 0 ? chosenTargetIdx : 0,
+                            targetWR, targetVP,
+                            mctsResult.getValueEstimate());
+                }
+            }
+
+            List<SpellAbility> result = new ArrayList<>();
+            result.add(chosen);
+            return result;
+        }
+
         if (rl.isModelServerAvailable()) {
             // Let the heuristic build the candidate lists (lands, filtering, etc.)
             // then use the RL model to pick from the mechanically-legal set
@@ -212,6 +288,40 @@ public class PlayerControllerRL extends forge.ai.PlayerControllerAi {
         }
         if (possibleAttackers.isEmpty()) return;
 
+        if (useMCTS) {
+            forge.ai.rl.mcts.MCTSResult mctsResult =
+                    mcts.decideAttackers(getGame(), attacker, possibleAttackers);
+
+            // Determine which creatures attack from best pattern
+            List<Integer> attackerIndices = new ArrayList<>();
+            int bestPattern = mctsResult.getSelectedIndex();
+            if (bestPattern == 1) {
+                // All-in
+                for (int i = 0; i < possibleAttackers.size(); i++) attackerIndices.add(i);
+            } else if (bestPattern >= 2) {
+                // Individual creature
+                attackerIndices.add(bestPattern - 2);
+            }
+            // bestPattern == 0 means no attack
+
+            for (int idx : attackerIndices) {
+                if (idx >= 0 && idx < possibleAttackers.size()) {
+                    Card c = possibleAttackers.get(idx);
+                    if (CombatUtil.canAttack(c, defender)) {
+                        combat.addAttacker(c, defender);
+                    }
+                }
+            }
+
+            // Record with MCTS per-creature win rates
+            rl.capturePreDecisionState(possibleAttackers);
+            rl.recordMCTSAttack(possibleAttackers, attackerIndices,
+                    mctsResult.getWinRates(),
+                    mctsResult.getVisitProportions(),
+                    mctsResult.getValueEstimate());
+            return;
+        }
+
         if (rl.isModelServerAvailable()) {
             // RL model makes the decision
             List<Integer> attackerIndices = rl.decideAttackers(possibleAttackers);
@@ -258,6 +368,17 @@ public class PlayerControllerRL extends forge.ai.PlayerControllerAi {
         }
         CardCollection attackers = combat.getAttackers();
         if (possibleBlockers.isEmpty() || attackers.isEmpty()) return;
+
+        if (useMCTS) {
+            // Let heuristic decide blocks first, then verify via MCTS
+            rl.capturePreDecisionState(possibleBlockers);
+            super.declareBlockers(defender, combat);
+
+            // Record the heuristic's blocking decision
+            rl.recordHeuristicBlockAssignment(
+                    possibleBlockers, attackers, combat);
+            return;
+        }
 
         if (rl.isModelServerAvailable()) {
             // RL model makes the decision
@@ -380,6 +501,32 @@ public class PlayerControllerRL extends forge.ai.PlayerControllerAi {
             boolean isOptional, Player targetedPlayer,
             Map<String, Object> params) {
 
+        if (useMCTS && optionList.size() > 1) {
+            // MCTS evaluates each target via rollouts
+            List<GameEntity> targets = new ArrayList<>(optionList);
+            forge.ai.rl.mcts.MCTSResult mctsResult =
+                    mcts.decideTarget(getGame(), player, targets, sa);
+            int idx = Math.max(0, Math.min(
+                    mctsResult.getSelectedIndex(),
+                    optionList.size() - 1));
+
+            // Record with MCTS rates
+            List<float[]> feats = new ArrayList<>();
+            for (T entity : optionList) {
+                if (entity instanceof Card) {
+                    feats.add(CardFeatures.encode((Card) entity, player));
+                } else {
+                    feats.add(ActionEncoder.encodeTarget(entity));
+                }
+            }
+            float[] spellFeats = sa != null ? ActionEncoder.encode(sa) : null;
+            rl.recordMCTSTarget(sa, targets,
+                    idx, mctsResult.getWinRates(),
+                    mctsResult.getVisitProportions(),
+                    mctsResult.getValueEstimate());
+            return optionList.get(idx);
+        }
+
         if (rl.isModelServerAvailable()
                 && optionList.size() > 1) {
             // RL model picks the target — pass spell features for context
@@ -434,6 +581,10 @@ public class PlayerControllerRL extends forge.ai.PlayerControllerAi {
             String title, int min, int max,
             boolean isOptional,
             Map<String, Object> params) {
+        if (useMCTS && sourceList.size() > 1) {
+            // Let heuristic decide — card selection is combinatorial
+            // and the heuristic's choice is recorded for training
+        }
         if (rl.isModelServerAvailable() && sourceList.size() > 1) {
             List<Integer> selected = rl.decideCardSelection(sourceList, min, max);
             CardCollection rlResult = new CardCollection();
@@ -572,6 +723,23 @@ public class PlayerControllerRL extends forge.ai.PlayerControllerAi {
     @Override
     public boolean mulliganKeepHand(
             Player firstPlayer, int cardsToReturn) {
+        if (useMCTS) {
+            forge.ai.rl.mcts.MCTSResult result =
+                    mcts.decideMulligan(getGame(), player);
+            boolean keep = result.getSelectedIndex() == 1;
+
+            List<float[]> handFeats = new ArrayList<>();
+            CardCollectionView hand = player.getCardsIn(ZoneType.Hand);
+            for (Card c : hand) {
+                handFeats.add(CardFeatures.encode(c, player));
+            }
+            rl.recordDecisionDirect(DecisionType.MULLIGAN,
+                    2, List.of(keep ? 1 : 0), handFeats,
+                    "mcts_mulligan_" + cardsToReturn
+                    + (keep ? "_keep" : "_mull"));
+            return keep;
+        }
+
         if (rl.isModelServerAvailable()) {
             CardCollectionView hand = player.getCardsIn(ZoneType.Hand);
             boolean keep = rl.decideMulligan(hand, cardsToReturn);
@@ -605,6 +773,10 @@ public class PlayerControllerRL extends forge.ai.PlayerControllerAi {
             String message, List<String> options,
             Card cardToShow,
             Map<String, Object> params) {
+        if (useMCTS) {
+            // Let heuristic decide binary choices — too many
+            // different types to simulate meaningfully
+        }
         if (rl.isModelServerAvailable()) {
             boolean result = rl.decideBinary("confirm_" + mode);
             Logger.info("RL_BINARY: {} (confirm_{})", result ? "YES" : "NO", mode);

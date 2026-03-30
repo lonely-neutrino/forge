@@ -1,18 +1,21 @@
 package forge.ai.rl.training;
 
-import com.google.gson.Gson;
-import com.google.gson.GsonBuilder;
-import forge.ai.rl.decisions.DecisionContext;
-import forge.ai.rl.decisions.DecisionResult;
-import org.tinylog.Logger;
-
-import java.io.*;
+import java.io.BufferedWriter;
+import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
+
+import org.tinylog.Logger;
+
+import com.google.gson.Gson;
+import com.google.gson.GsonBuilder;
+
+import forge.ai.rl.decisions.DecisionContext;
+import forge.ai.rl.decisions.DecisionResult;
 
 /**
  * Records game trajectories (sequences of state-action-reward tuples) for training.
@@ -104,6 +107,7 @@ public class TrajectoryRecorder {
         record.candidateCount = context.getCandidateFeatures().size();
         record.selectedIndices = result.getSelectedIndices();
         record.actionProbabilities = result.getActionProbabilities();
+        record.visitProportions = result.getVisitProportions();
         record.valueEstimate = result.getValueEstimate();
         record.usedFallback = result.isUsedFallback();
         record.source = result.isUsedFallback() ? "heuristic" : "ppo";
@@ -270,7 +274,8 @@ public class TrajectoryRecorder {
         int candidateCount;
         List<Integer> selectedIndices;
         List<Integer> modelSelectedIndices;
-        float[] actionProbabilities;
+        float[] actionProbabilities;   // win rates (Q-values) per candidate
+        float[] visitProportions;      // visit fractions per candidate (search policy)
         float valueEstimate;
         boolean usedFallback;
         boolean counterfactualHeuristicAvailable;

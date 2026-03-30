@@ -1216,7 +1216,9 @@ public class PhaseHandler implements java.io.Serializable {
         }
         turn = cturn;
 
-        game.fireEvent(new GameEventTurnPhase(playerTurn, phase, "dev"));
+        if (playerTurn != null && phase != null) {
+            game.fireEvent(new GameEventTurnPhase(playerTurn, phase, "dev"));
+        }
         if (endCombat) {
             endCombat(); // not-null can be created only when declare attackers phase begins
         }

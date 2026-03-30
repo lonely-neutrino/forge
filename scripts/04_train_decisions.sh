@@ -1,8 +1,9 @@
 #!/bin/bash
 # Step 4: Train attack/block/priority decision heads (imitation learning)
-# Usage: 04_train_decisions.sh [epochs] [batch_size] [encoder] [heads] [device] [--joint]
+# Usage: 04_train_decisions.sh [epochs] [batch_size] [encoder] [heads] [device] [--joint] [--model-size SIZE]
 # heads: "all" (default), or comma-separated: "priority", "attack,block", etc.
 # --joint: train all heads simultaneously with unfrozen encoder
+# --model-size: small (512/23M), medium (768/45M), large (1024/73M), xl (1024/107M)
 set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -60,11 +61,18 @@ else
     CKPT_DIR_PY="$CKPT_DIR"
 fi
 JOINT_FLAG=""
+MODEL_SIZE_FLAG=""
 if [[ "$*" == *"--joint"* ]]; then
     JOINT_FLAG="--joint"
     echo "JOINT MODE: training all heads with unfrozen encoder"
 fi
-
+for arg in "$@"; do
+    if [[ "$prev" == "--model-size" ]]; then
+        MODEL_SIZE_FLAG="--model-size $arg"
+        echo "MODEL SIZE: $arg"
+    fi
+    prev="$arg"
+done
 
 # Auto-select best available checkpoint if not explicitly provided
 if [ -z "$3" ]; then
@@ -114,4 +122,5 @@ echo "Device: $DEVICE"
     --epochs "$EPOCHS" \
     --batch-size "$BATCH" \
     --heads "$HEADS" \
-    $JOINT_FLAG
+    $JOINT_FLAG \
+    $MODEL_SIZE_FLAG
