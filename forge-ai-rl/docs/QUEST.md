@@ -38,10 +38,30 @@ If these are unset, the repo defaults to local `rl_data/...` paths.
    - `QUEST_JAVA_MODULE`
    - `QUEST_PYTHON_MODULE`
    - `QUEST_CUDA_MODULE`
-3. Create the Python environment:
+   - optionally `QUEST_MAMBA_MODULE`
+   - optionally `QUEST_PYTHON_ENV_TYPE`
+   - optionally `QUEST_MAMBA_ENV`
+   - optionally `QUEST_MAMBA_INIT`
+3. Create the Python environment.
+
+For the repo-managed `venv` workflow:
 
 ```bash
 bash scripts/quest/setup_env.sh
+```
+
+For a `mamba`-managed workflow:
+
+```bash
+export QUEST_PYTHON_ENV_TYPE=mamba
+export QUEST_MAMBA_ENV=forge_rl
+bash scripts/quest/setup_mamba_env.sh
+```
+
+If QUEST requires explicit initialization for `mamba`/`conda`, also set:
+
+```bash
+export QUEST_MAMBA_INIT="$HOME/.bashrc"
 ```
 
 4. Build the Java jar:
@@ -67,11 +87,15 @@ bash scripts/quest/submit_eval.sh
 - Use interactive jobs only for smoke tests and environment debugging.
 - The Java subprocesses and Python model server are designed to run together inside one allocated node using localhost networking.
 - The Tk dashboards remain available for workstation use, but the standard QUEST path is now headless.
+- The QUEST batch scripts now activate either:
+  - the repo `venv` when `QUEST_PYTHON_ENV_TYPE=venv`
+  - a named `mamba`/`conda` environment when `QUEST_PYTHON_ENV_TYPE=mamba`
 
 ## Fresh-Clone Validation Checklist
 
 - Java 17 and Maven build successfully.
 - Python environment installs `requirements.txt`.
+- If using `mamba`, the job shell can activate `QUEST_MAMBA_ENV`.
 - `bash scripts/01_build.sh` produces the Forge fat jar or `FORGE_JAR_PATH` is set.
 - `bash scripts/02_collect_data.sh 10 --clean` runs on a CPU node.
 - `bash scripts/03_train_value.sh 1 64 cuda` runs on a GPU node.

@@ -19,6 +19,11 @@ QUEST_GPU_COUNT="${QUEST_GPU_COUNT:-1}"
 QUEST_JAVA_MODULE="${QUEST_JAVA_MODULE:-}"
 QUEST_PYTHON_MODULE="${QUEST_PYTHON_MODULE:-}"
 QUEST_CUDA_MODULE="${QUEST_CUDA_MODULE:-}"
+QUEST_MAMBA_MODULE="${QUEST_MAMBA_MODULE:-}"
+
+QUEST_PYTHON_ENV_TYPE="${QUEST_PYTHON_ENV_TYPE:-venv}"
+QUEST_MAMBA_ENV="${QUEST_MAMBA_ENV:-forge_rl}"
+QUEST_MAMBA_INIT="${QUEST_MAMBA_INIT:-}"
 
 QUEST_PROJECT_ROOT="${QUEST_PROJECT_ROOT:-$HOME/forge}"
 QUEST_RUN_ROOT="${QUEST_RUN_ROOT:-$HOME/scratch/forge_rl}"
@@ -45,6 +50,9 @@ quest_load_modules() {
     if [ -n "$QUEST_CUDA_MODULE" ]; then
         module load "$QUEST_CUDA_MODULE"
     fi
+    if [ -n "$QUEST_MAMBA_MODULE" ]; then
+        module load "$QUEST_MAMBA_MODULE"
+    fi
 }
 
 quest_prepare_dirs() {
@@ -55,4 +63,39 @@ quest_prepare_dirs() {
         "$FORGE_RL_LOG_DIR" \
         "$FORGE_RL_PPO_TRAJ_DIR" \
         "$FORGE_RL_EVAL_DIR"
+}
+
+quest_activate_python_env() {
+    case "$QUEST_PYTHON_ENV_TYPE" in
+        mamba)
+            if [ -n "$QUEST_MAMBA_INIT" ]; then
+                # shellcheck disable=SC1090
+                source "$QUEST_MAMBA_INIT"
+            fi
+
+            if command -v micromamba >/dev/null 2>&1; then
+                eval "$(micromamba shell hook --shell bash)"
+                micromamba activate "$QUEST_MAMBA_ENV"
+            elif command -v mamba >/dev/null 2>&1; then
+                eval "$(mamba shell hook --shell bash)"
+                mamba activate "$QUEST_MAMBA_ENV"
+            elif command -v conda >/dev/null 2>&1; then
+                eval "$(conda shell.bash hook)"
+                conda activate "$QUEST_MAMBA_ENV"
+            else
+                echo "No mamba/conda executable found for QUEST_PYTHON_ENV_TYPE=mamba" >&2
+                exit 1
+            fi
+            ;;
+        venv)
+            if [ -f "$PROJECT_ROOT/forge-ai-rl/venv/bin/activate" ]; then
+                # shellcheck disable=SC1091
+                source "$PROJECT_ROOT/forge-ai-rl/venv/bin/activate"
+            fi
+            ;;
+        *)
+            echo "Unsupported QUEST_PYTHON_ENV_TYPE: $QUEST_PYTHON_ENV_TYPE" >&2
+            exit 1
+            ;;
+    esac
 }

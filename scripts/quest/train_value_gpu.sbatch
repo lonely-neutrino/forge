@@ -14,6 +14,7 @@ source "$SCRIPT_DIR/quest_env.sh"
 
 quest_load_modules
 quest_prepare_dirs
+quest_activate_python_env
 
 cd "$PROJECT_ROOT"
 bash scripts/03_train_value.sh "${1:-50}" "${2:-256}" "${3:-cuda}"

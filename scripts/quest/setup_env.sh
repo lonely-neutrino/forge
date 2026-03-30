@@ -23,6 +23,7 @@ python -m pip install --upgrade pip
 python -m pip install -r src/main/python/requirements.txt
 
 echo "QUEST environment ready."
+echo "Env type: venv"
 echo "Project root: $PROJECT_ROOT"
 echo "Data dir: $FORGE_RL_DATA_DIR"
 echo "Checkpoint dir: $FORGE_RL_CHECKPOINT_DIR"

@@ -14,6 +14,7 @@ source "$SCRIPT_DIR/quest_env.sh"
 
 quest_load_modules
 quest_prepare_dirs
+quest_activate_python_env
 
 cd "$PROJECT_ROOT"
 bash scripts/04_train_decisions.sh "${1:-20}" "${2:-256}" "${3:-}" "${4:-all}" "${5:-cuda}"
