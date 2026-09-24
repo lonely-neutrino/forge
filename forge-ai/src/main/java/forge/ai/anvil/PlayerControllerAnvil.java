@@ -4,6 +4,8 @@ import com.google.common.collect.Lists;
 
 import forge.LobbyPlayer;
 import forge.ai.AiPlayDecision;
+import forge.card.ColorSet;
+import forge.card.MagicColor;
 import forge.game.Game;
 import forge.game.card.Card;
 import forge.game.card.CardCollection;
@@ -43,6 +45,7 @@ public class PlayerControllerAnvil extends CensusPlayerController {
     public static final String TAG_ATTACK = "mtg.attack";   // M2 D5
     public static final String TAG_BLOCK = "mtg.block";     // M2 D5
     public static final String TAG_PAY_CLASS = "mtg.pay_mana_class"; // M9 D3 §3c
+    public static final String TAG_COLOR = "mtg.choose_color"; // M11
 
     private final AnvilBridge bridge;
     private final Set<String> bridgedTags;
@@ -55,6 +58,61 @@ public class PlayerControllerAnvil extends CensusPlayerController {
 
     private boolean bridged(String tag) {
         return bridgedTags.contains(tag);
+    }
+
+    @Override
+    public byte chooseColor(String message, SpellAbility sa, ColorSet colors) {
+        if (!bridged(TAG_COLOR)) {
+            return super.chooseColor(message, sa, colors);
+        }
+        List<String> options = Obs.colorOptions(colors);
+        if (options.isEmpty()) {
+            return super.chooseColor(message, sa, colors);
+        }
+        long obsSeq = Obs.decBridged(getGame(), getPlayer(), "chooseColor", options,
+                "message", message, "sa", Census.str(sa));
+        int pick = bridge.selectOne(TAG_COLOR, options);
+        if (pick < 0 || pick >= options.size()) {
+            pick = 0;
+        }
+        byte chosen = MagicColor.fromName(options.get(pick));
+        Census.rec(getGame(), getPlayer(), "chooseColor", "by", "bridge",
+                "options", options.size(), "pick", options.get(pick),
+                "color", MagicColor.toLongString(chosen));
+        Obs.ret(getGame(), obsSeq, MagicColor.toLongString(chosen));
+        return chosen;
+    }
+
+    /**
+     * Brave the Elements and other one-color effects use the plural Forge
+     * callback even when exactly one color is required.  Keep the existing
+     * SELECT_ONE bridge shape for that case; multi-color selection remains on
+     * the inherited heuristic path until it has a dedicated action surface.
+     */
+    @Override
+    public ColorSet chooseColors(String message, SpellAbility sa, int min, int max,
+            ColorSet colors) {
+        if (!bridged(TAG_COLOR) || min != 1 || max != 1) {
+            return super.chooseColors(message, sa, min, max, colors);
+        }
+        List<String> options = Obs.colorOptions(colors);
+        if (options.isEmpty()) {
+            return super.chooseColors(message, sa, min, max, colors);
+        }
+        long obsSeq = Obs.decBridged(getGame(), getPlayer(), "chooseColors", options,
+                "message", message, "sa", Census.str(sa), "min", min, "max", max);
+        int pick = bridge.selectOne(TAG_COLOR, options);
+        if (pick < 0 || pick >= options.size()) {
+            pick = 0;
+        }
+        String label = options.get(pick);
+        byte chosen = MagicColor.fromName(label);
+        ColorSet chosenSet = ColorSet.fromNames(List.of(label));
+        Census.rec(getGame(), getPlayer(), "chooseColors", "by", "bridge",
+                "options", options.size(), "pick", label,
+                "color", MagicColor.toLongString(chosen));
+        Obs.ret(getGame(), obsSeq, MagicColor.toLongString(chosen));
+        return chosenSet;
     }
 
     /** Does this seat answer priority over the bridge? (M7 forced-branch
@@ -476,11 +534,13 @@ public class PlayerControllerAnvil extends CensusPlayerController {
                 Census.rec(getGame(), getPlayer(), "chooseSpellAbilityToPlay",
                         "by", "bridge", "options", options.size(), "pick", Census.str(picked),
                         "oneshot", true, "veto", r.veto, "hostSas", r.hostSas, "fits", r.fitCount,
+                        "ignoredTargets", r.ignoredTargets,
                         "reask", attempt);
             } else {
                 Census.rec(getGame(), getPlayer(), "chooseSpellAbilityToPlay",
                         "by", "bridge", "options", options.size(), "pick", Census.str(picked),
-                        "oneshot", true, "veto", r.veto, "hostSas", r.hostSas, "fits", r.fitCount);
+                        "oneshot", true, "veto", r.veto, "hostSas", r.hostSas, "fits", r.fitCount,
+                        "ignoredTargets", r.ignoredTargets);
             }
             Obs.ret(getGame(), obsSeq, null);
             return new OneShot(null, plan.optionIndex);
@@ -489,12 +549,12 @@ public class PlayerControllerAnvil extends CensusPlayerController {
             Census.rec(getGame(), getPlayer(), "chooseSpellAbilityToPlay",
                     "by", "bridge", "options", options.size(), "pick", Census.str(r.sa),
                     "oneshot", true, "rung", r.rung, "hostSas", r.hostSas, "fits", r.fitCount,
-                    "divided", r.divided, "reask", attempt);
+                    "divided", r.divided, "ignoredTargets", r.ignoredTargets, "reask", attempt);
         } else {
             Census.rec(getGame(), getPlayer(), "chooseSpellAbilityToPlay",
                     "by", "bridge", "options", options.size(), "pick", Census.str(r.sa),
                     "oneshot", true, "rung", r.rung, "hostSas", r.hostSas, "fits", r.fitCount,
-                    "divided", r.divided);
+                    "divided", r.divided, "ignoredTargets", r.ignoredTargets);
         }
         Obs.ret(getGame(), obsSeq, Lists.newArrayList(r.sa));
         return new OneShot(Lists.newArrayList(r.sa), 0);
