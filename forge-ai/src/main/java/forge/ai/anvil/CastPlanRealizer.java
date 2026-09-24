@@ -1,6 +1,7 @@
 package forge.ai.anvil;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 
 import forge.game.Game;
@@ -39,18 +40,21 @@ public final class CastPlanRealizer {
         public final int hostSas;      // options sharing the chosen host
         public final int fitCount;     // SAs that passed shape-fit
         public final boolean divided;  // even-split divided allocation applied
+        public final boolean ignoredTargets; // target refs ignored on targetless SA
 
-        private Result(SpellAbility sa, String veto, String rung, int hostSas, int fitCount) {
+        private Result(SpellAbility sa, String veto, String rung, int hostSas, int fitCount,
+                boolean ignoredTargets) {
             this.sa = sa;
             this.veto = veto;
             this.rung = rung;
             this.hostSas = hostSas;
             this.fitCount = fitCount;
             this.divided = sa != null && isDivided(sa);
+            this.ignoredTargets = ignoredTargets;
         }
 
         private static Result veto(String reason, int hostSas, int fitCount) {
-            return new Result(null, reason, null, hostSas, fitCount);
+            return new Result(null, reason, null, hostSas, fitCount, false);
         }
     }
 
@@ -59,19 +63,34 @@ public final class CastPlanRealizer {
 
     public static Result realize(Game game, Player player, List<SpellAbility> hostSas,
             CastPlanAnswer ans) {
-        List<GameObject> refs = resolveRefs(game, ans.targets);
-        if (refs == null) {
-            return Result.veto("dangling_ref", hostSas.size(), 0);
-        }
+        List<GameObject> refs = null;
+        boolean refsResolved = false;
+        boolean danglingRefs = false;
         List<SpellAbility> fits = new ArrayList<>(2);
         for (SpellAbility sa : hostSas) {
-            boolean ok = tryApply(sa, refs, ans);
+            List<GameObject> saRefs = Collections.emptyList();
+            if (hasTargeting(sa)) {
+                if (!refsResolved) {
+                    refs = resolveRefs(game, ans.targets);
+                    refsResolved = true;
+                }
+                if (refs == null) {
+                    danglingRefs = true;
+                    clear(sa);
+                    continue;
+                }
+                saRefs = refs;
+            }
+            boolean ok = tryApply(sa, saRefs, ans);
             clear(sa);
             if (ok) {
                 fits.add(sa);
             }
         }
         if (fits.isEmpty()) {
+            if (danglingRefs) {
+                return Result.veto("dangling_ref", hostSas.size(), 0);
+            }
             // Modal spells (Charm api): the targeting lives inside modes that
             // bind at cast time, so the model's refs describe mode targets the
             // bare chain can't hold (smoke 3: 226/227 no-fit vetoes were
@@ -94,14 +113,15 @@ public final class CastPlanRealizer {
                     clear(sa);
                     continue;
                 }
-                return new Result(sa, null, "modal", hostSas.size(), 0);
+                return new Result(sa, null, "modal", hostSas.size(), 0, false);
             }
             return Result.veto("no_shape_fit", hostSas.size(), 0);
         }
         List<SpellAbility> playable = new ArrayList<>(fits.size());
         String lastReason = null;
         for (SpellAbility sa : fits) {
-            tryApply(sa, refs, ans); // legality/payability judged with targets+X set
+            List<GameObject> saRefs = hasTargeting(sa) ? refs : Collections.emptyList();
+            tryApply(sa, saRefs, ans); // legality/payability judged with targets+X set
             String why = legality(game, player, sa);
             if (why == null && !sa.isLandAbility()
                     && !AnvilOptions.payableOrRescue(game, player, sa)) {
@@ -133,8 +153,10 @@ public final class CastPlanRealizer {
             pick = preferByKind(playable);
             rung = sameKind(playable) ? "order" : "kind";
         }
-        tryApply(pick, refs, ans); // leave the pick armed for the engine
-        return new Result(pick, null, rung, hostSas.size(), fits.size());
+        List<GameObject> pickRefs = hasTargeting(pick) ? refs : Collections.emptyList();
+        tryApply(pick, pickRefs, ans); // leave the pick armed for the engine
+        boolean ignoredTargets = !ans.targets.isEmpty() && !hasTargeting(pick);
+        return new Result(pick, null, rung, hostSas.size(), fits.size(), ignoredTargets);
     }
 
     /** Model refs -> engine objects; null on any dangling ref. */
@@ -192,10 +214,12 @@ public final class CastPlanRealizer {
             sa.setXManaCostPaid(ans.x);
         }
         int ri = 0;
+        boolean hasTargeting = false;
         for (SpellAbility node = sa; node != null; node = node.getSubAbility()) {
             if (!node.usesTargeting()) {
                 continue;
             }
+            hasTargeting = true;
             node.clearTargets(); // also initializes dividedValue (X already set above)
             TargetRestrictions tr = node.getTargetRestrictions();
             int min = tr.getMinTargets(node.getHostCard(), node);
@@ -226,7 +250,18 @@ public final class CastPlanRealizer {
                 }
             }
         }
-        return ri == refs.size();
+        // Targetless spells have no shape slot for the shared decoder's
+        // irrelevant refs. Target-bearing spells must consume every ref.
+        return !hasTargeting || ri == refs.size();
+    }
+
+    private static boolean hasTargeting(SpellAbility sa) {
+        for (SpellAbility node = sa; node != null; node = node.getSubAbility()) {
+            if (node.usesTargeting()) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static void clear(SpellAbility sa) {

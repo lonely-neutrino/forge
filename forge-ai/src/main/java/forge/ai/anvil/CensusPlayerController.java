@@ -8,6 +8,7 @@ import forge.LobbyPlayer;
 import forge.ai.PlayerControllerAi;
 import forge.card.ColorSet;
 import forge.card.ICardFace;
+import forge.card.MagicColor;
 import forge.card.mana.ManaCost;
 import forge.card.mana.ManaCostShard;
 import forge.deck.Deck;
@@ -909,9 +910,9 @@ public class CensusPlayerController extends PlayerControllerAi {
     @Override
     public byte chooseColor(String message, SpellAbility sa, ColorSet colors) {
         Census.rec(getGame(), getPlayer(), "chooseColor", "message", message, "sa", Census.str(sa));
-        long __s = Obs.dec(getGame(), getPlayer(), "chooseColor", "message", message, "sa", Census.str(sa));
+        long __s = Obs.decWithOptions(getGame(), getPlayer(), "chooseColor", Obs.colorOptions(colors), "message", message, "sa", Census.str(sa));
         byte __r = super.chooseColor(message, sa, colors);
-        Obs.ret(getGame(), __s, __r);
+        Obs.ret(getGame(), __s, MagicColor.toLongString(__r));
         return __r;
     }
 

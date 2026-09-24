@@ -3,6 +3,8 @@ package forge.ai.anvil;
 import com.github.luben.zstd.ZstdOutputStream;
 import forge.LobbyPlayer;
 import forge.ai.LobbyPlayerAi;
+import forge.card.ColorSet;
+import forge.card.MagicColor;
 import forge.game.Game;
 import forge.game.card.Card;
 import forge.game.keyword.Keyword;
@@ -568,6 +570,23 @@ public final class Obs {
      */
     public static long dec(Game g, Player p, String m, Object... kv) {
         return decInternal(g, p, m, null, null, false, kv);
+    }
+
+    /** Unprovenanced decision variant that records plain option labels. */
+    public static long decWithOptions(Game g, Player p, String m,
+            java.util.List<String> opts, Object... kv) {
+        return decInternal(g, p, m, null, opts, false, kv);
+    }
+
+    /** Canonical WUBRG labels for single-color callbacks. */
+    public static java.util.List<String> colorOptions(ColorSet colors) {
+        java.util.List<String> out = new java.util.ArrayList<>();
+        for (byte color : MagicColor.WUBRG) {
+            if ((colors.getColor() & color) != 0) {
+                out.add(MagicColor.toLongString(color));
+            }
+        }
+        return out;
     }
 
     /** Bridged variant: provenance tag + materialized option labels. */
