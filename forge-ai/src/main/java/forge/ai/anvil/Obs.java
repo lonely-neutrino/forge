@@ -815,6 +815,15 @@ public final class Obs {
         return lastDecOf(sessions.get(g));
     }
 
+    /** Next structured decision/window id for a live logged game.  Rollout
+     * monitors use this before the priority callback emits its dec record so
+     * candidate replays can guard on the stable window id as well as turn,
+     * phase, and seat. */
+    public static synchronized long nextDecisionSequence(Game g) {
+        Session ses = sessions.get(g);
+        return ses == null ? -1 : ses.seq;
+    }
+
     private static String lastDecOf(Session ses) {
         if (ses == null || ses.lastDecRecord == null) {
             return null;

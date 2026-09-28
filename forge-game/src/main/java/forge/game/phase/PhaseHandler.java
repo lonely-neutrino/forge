@@ -1190,6 +1190,14 @@ public class PhaseHandler implements java.io.Serializable, IHasForgeLog {
         givePriorityToPlayer = true;
     }
 
+    /** Fork/debug counterpart that preserves the source priority seat. */
+    public final void devResumeAtPriority(final Player priorityPlayer) {
+        if (priorityPlayer != null) {
+            setPriority(priorityPlayer);
+        }
+        givePriorityToPlayer = true;
+    }
+
     public final boolean devAdvanceToPhase(PhaseType targetPhase) {
         return devAdvanceToPhase(targetPhase, null);
     }

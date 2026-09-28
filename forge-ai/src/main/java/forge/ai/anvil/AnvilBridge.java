@@ -26,6 +26,11 @@ public interface AnvilBridge {
         return false;
     }
 
+    /** True only when the transport/server can honor exact candidate forcing. */
+    default boolean supportsForcedCandidate() {
+        return false;
+    }
+
     /** SELECT_ONE: pick over options (index into the list). */
     int selectOne(String tag, List<String> optionLabels);
 
@@ -71,6 +76,15 @@ public interface AnvilBridge {
     default CastPlanAnswer priorityCastPlan(String tag, List<String> optionLabels,
             String observation, int attempt, boolean forbidDecline) {
         return priorityCastPlan(tag, optionLabels, observation, attempt);
+    }
+
+    /** Candidate-drill intervention: forcedOption is one-based in the
+     *  wire option list (0 is PASS).  Implementations that do not advertise
+     *  the additive protocol capability return null; the rollout driver
+     *  records that as an explicit unsupported skip. */
+    default CastPlanAnswer priorityCastPlan(String tag, List<String> optionLabels,
+            String observation, int attempt, boolean forbidDecline, int forcedOption) {
+        return priorityCastPlan(tag, optionLabels, observation, attempt, forbidDecline);
     }
 
     /**

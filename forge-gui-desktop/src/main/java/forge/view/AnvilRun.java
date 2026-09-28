@@ -102,6 +102,7 @@ public final class AnvilRun {
                     + "[-range <start> <count> -seedbase <long> [-results <jsonl>] [-stopfile <path>]] "
                     + "[-rollout <k> -points <m> -labels <jsonl> [-noreshuffle]] "
                     + "[-drillfile <txt> [-drillstop]] [-forkobs] [-forcebranch] [-forceseq <n>] "
+                    + "[-forcecandidate <tsv>] "
                     + "[-seqarms nat|all] [-forceschedule <tsv>] [-forcechoice <tsv>] "
                     + "[-n <games>] [-s <baseSeed>]");
             return;
@@ -339,6 +340,34 @@ public final class AnvilRun {
             drillStop = true;
         }
 
+        // Generic counterfactual candidate mode: one natural arm plus one
+        // exact (host entity, normalized SA) forced arm per candidate point.
+        // The target file is outcome-independent and is joined by the stable
+        // source window id, not only by turn.
+        Map<Integer, Map<Integer, CandidatePoint>> candidateJobs = null;
+        boolean forceCandidate = params.containsKey("forcecandidate");
+        if (forceCandidate) {
+            if (rolloutK <= 0 || !params.containsKey("labels")) {
+                System.err.println("FATAL: -forcecandidate requires -rollout <k> + -labels");
+                System.exit(2);
+            }
+            if (forkObs || forceBranch || forceSeq > 0 || schedJobs != null
+                    || choiceJobs != null) {
+                System.err.println("FATAL: -forcecandidate excludes other rollout arm modes");
+                System.exit(2);
+            }
+            candidateJobs = readCandidateFile(params.get("forcecandidate").get(0));
+            if (drillTargets == null) {
+                drillTargets = new HashMap<>();
+                for (Map.Entry<Integer, Map<Integer, CandidatePoint>> e : candidateJobs.entrySet()) {
+                    int[] ts = e.getValue().values().stream().mapToInt(p -> p.turn).distinct().toArray();
+                    Arrays.sort(ts);
+                    drillTargets.put(e.getKey(), ts);
+                }
+            }
+            drillStop = true;
+        }
+
         final AnvilBridge bridge;
         if ("local-random".equals(bridgeMode)) {
             bridge = new LocalRandomBridge();
@@ -568,13 +597,16 @@ public final class AnvilRun {
                 long gameT0 = System.currentTimeMillis();
                 bridge.gameStart("g" + idx, seed);
                 int[] drillTurns = drillTargets != null ? drillTargets.get(idx) : null;
+                RolloutMonitor rolloutMonitor = null;
                 if (rolloutK > 0) {
-                    game.subscribeToEvents(new RolloutMonitor(game, idx, seed,
+                    rolloutMonitor = new RolloutMonitor(game, idx, seed,
                             rolloutK, rolloutPoints, rolloutReshuffle, bridge,
                             type.toString(), labels, watchdogs, drillTurns, drillStop,
                             forkObs, forceBranch, forceSeq, seqNatOnly,
                             schedJobs != null ? schedJobs.get(idx) : null,
-                            choiceJobs != null ? choiceJobs.get(idx) : null));
+                            choiceJobs != null ? choiceJobs.get(idx) : null,
+                            candidateJobs != null ? candidateJobs.get(idx) : null);
+                    game.subscribeToEvents(rolloutMonitor);
                 }
                 // Rollout forks run inside the game's wall — budget the clocks
                 // for them (45 s/rollout is far above the 4.4 s median but
@@ -582,7 +614,14 @@ public final class AnvilRun {
                 // eat the whole game budget). Forced-branch mode runs 2xK;
                 // sequence mode 3xK (1xK single-natural-arm).
                 int fpBudget = drillTurns != null ? drillTurns.length : rolloutPoints;
-                int perPoint = (schedJobs != null ? (1 + schedMaxArms)
+                int candidateArms = 0;
+                if (candidateJobs != null && candidateJobs.get(idx) != null) {
+                    for (CandidatePoint cp : candidateJobs.get(idx).values()) {
+                        candidateArms = Math.max(candidateArms, cp.arms.size());
+                    }
+                }
+                int perPoint = (candidateJobs != null ? (1 + candidateArms)
+                        : schedJobs != null ? (1 + schedMaxArms)
                         : choiceJobs != null ? (1 + choiceMaxArms)
                         : forceSeq > 0 ? (seqNatOnly ? 1 : 3) : (forceBranch ? 2 : 1))
                         * rolloutK;
@@ -611,6 +650,9 @@ public final class AnvilRun {
                     }
                 } finally {
                     drawClock.cancel(false);
+                }
+                if (rolloutMonitor != null) {
+                    rolloutMonitor.finishCandidateSkips();
                 }
                 long wallMs = System.currentTimeMillis() - gameT0;
                 String winner = game.getOutcome() != null && !game.getOutcome().isDraw()
@@ -894,6 +936,89 @@ public final class AnvilRun {
         return out;
     }
 
+    // ------------------------------------------------------------------
+    // Generic priority candidate drills.  Contract:
+    // gameIdx windowId ordinal turn phase seat entityId normalizedSA
+    // ------------------------------------------------------------------
+
+    static final class CandidateArm {
+        final int ordinal;
+        final int entity;
+        final String sa;
+
+        CandidateArm(int ordinal, int entity, String sa) {
+            this.ordinal = ordinal;
+            this.entity = entity;
+            this.sa = sa;
+        }
+    }
+
+    static final class CandidatePoint {
+        final String source;
+        final int window;
+        final int turn;
+        final String phase;
+        final int seat;
+        final List<CandidateArm> arms = new ArrayList<>();
+
+        CandidatePoint(String source, int window, int turn, String phase, int seat) {
+            this.source = source;
+            this.window = window;
+            this.turn = turn;
+            this.phase = phase;
+            this.seat = seat;
+        }
+    }
+
+    private static Map<Integer, Map<Integer, CandidatePoint>> readCandidateFile(String path) {
+        Map<Integer, Map<Integer, CandidatePoint>> out = new HashMap<>();
+        final String[] source = { "" };
+        try {
+            for (String line : Files.readAllLines(Paths.get(path), StandardCharsets.UTF_8)) {
+                if (line.startsWith("# source-store=")) {
+                    source[0] = line.substring("# source-store=".length()).trim();
+                    continue;
+                }
+                if (line.isEmpty() || line.startsWith("#") || line.startsWith("gameIdx\t")) {
+                    continue;
+                }
+                String[] f = line.split("\t", -1);
+                if (f.length != 8) {
+                    throw new IllegalArgumentException("bad candidate line (need 8 tab fields): " + line);
+                }
+                int game = Integer.parseInt(f[0]);
+                int window = Integer.parseInt(f[1]);
+                int ordinal = Integer.parseInt(f[2]);
+                int turn = Integer.parseInt(f[3]);
+                String phase = f[4];
+                int seat = Integer.parseInt(f[5]);
+                int entity = Integer.parseInt(f[6]);
+                String sa = f[7];
+                if (ordinal < 0 || entity < 0 || sa.isEmpty()) {
+                    throw new IllegalArgumentException("invalid candidate descriptor: " + line);
+                }
+                CandidatePoint p = out.computeIfAbsent(game, k -> new TreeMap<>())
+                        .computeIfAbsent(window, w -> new CandidatePoint(source[0], w, turn, phase, seat));
+                if (p.turn != turn || p.seat != seat || !p.phase.equals(phase)) {
+                    throw new IllegalArgumentException(
+                            "turn/phase/seat mismatch within g" + game + " window " + window);
+                }
+                for (CandidateArm a : p.arms) {
+                    if (a.ordinal == ordinal) {
+                        throw new IllegalArgumentException(
+                                "duplicate candidate ordinal " + ordinal + " at g" + game
+                                        + " window " + window);
+                    }
+                }
+                p.arms.add(new CandidateArm(ordinal, entity, sa));
+            }
+        } catch (Exception e) {
+            System.err.println("FATAL: cannot read candidate file " + path + ": " + e);
+            System.exit(2);
+        }
+        return out;
+    }
+
     /** Bounded-horizon stop for sched completions: end-of-turn stopTurn =
      *  the first TurnBegan with a higher number; forced end is a Draw so
      *  the row stays obviously non-decisive (the CensusRun/certify
@@ -960,6 +1085,9 @@ public final class AnvilRun {
         final Map<Integer, SchedPoint> sched;
         /** M11 choice mode: this game's fork points by turn; null = not choice. */
         final Map<Integer, ChoicePoint> choice;
+        /** Generic candidate points keyed by stable priority window id. */
+        final Map<Integer, CandidatePoint> candidate;
+        final Set<Integer> candidateDone = new HashSet<>();
         /** One printed stack per distinct throwable class per lane run. */
         private final Set<String> crashClassesPrinted = new HashSet<>();
         final java.util.TreeSet<Integer> targets = new java.util.TreeSet<>();
@@ -970,7 +1098,8 @@ public final class AnvilRun {
                 PrintWriter labels, ScheduledExecutorService watchdogs,
                 int[] drillTurns, boolean stopAfter, boolean forkObs,
                 boolean forceBranch, int forceSeq, boolean seqNatOnly,
-                Map<Integer, SchedPoint> sched, Map<Integer, ChoicePoint> choice) {
+                Map<Integer, SchedPoint> sched, Map<Integer, ChoicePoint> choice,
+                Map<Integer, CandidatePoint> candidate) {
             this.game = game;
             this.gameIdx = gameIdx;
             this.seed = seed;
@@ -987,6 +1116,7 @@ public final class AnvilRun {
             this.seqNatOnly = seqNatOnly;
             this.sched = sched;
             this.choice = choice;
+            this.candidate = candidate;
             if (drillTurns != null) {
                 // Drill mode: explicit fork turns from the manifest.
                 for (int t : drillTurns) {
@@ -1010,16 +1140,20 @@ public final class AnvilRun {
                 // completions from it (d6-run10 iter-9 cascade).
                 return;
             }
-            if (targets.isEmpty() || ev.phase() != PhaseType.MAIN1) {
+            if (targets.isEmpty()) {
+                return;
+            }
+            if (candidate == null && ev.phase() != PhaseType.MAIN1) {
                 return;
             }
             PhaseHandler ph = game.getPhaseHandler();
             if (ph.getTurn() < targets.first() || !game.getStack().isEmpty()) {
                 return;
             }
-            // Active player's priority only (GameCopier resets the copy's
-            // priority to the active player), quiescent stack only.
-            if (ph.getPriorityPlayer() != ph.getPlayerTurn()) {
+            // Legacy drill modes remain active-seat-only. Candidate mode is
+            // explicitly all-phase/all-priority-seat, with stack-empty and
+            // state-effect drain guards retained below.
+            if (candidate == null && ph.getPriorityPlayer() != ph.getPlayerTurn()) {
                 return;
             }
             java.util.Set<Card> affected = new HashSet<>();
@@ -1033,17 +1167,56 @@ public final class AnvilRun {
                 return;
             }
             int turn = ph.getTurn();
-            int targetTurn = targets.first();
-            while (!targets.isEmpty() && targets.first() <= turn) {
-                targets.pollFirst();
+            if (candidate != null) {
+                long window = Obs.nextDecisionSequence(game);
+                CandidatePoint point = candidatePointFor(
+                        turn, ev.phase(), ph.getPriorityPlayer(), window);
+                if (point == null) {
+                    return;
+                }
+                candidateDone.add(point.window);
+                doCandidateRollouts(turn, point);
+            } else {
+                int targetTurn = targets.first();
+                while (!targets.isEmpty() && targets.first() <= turn) {
+                    targets.pollFirst();
+                }
+                doRollouts(turn, targetTurn);
             }
-            doRollouts(turn, targetTurn);
-            if (stopAfter && targets.isEmpty()) {
+            if (stopAfter && (candidate != null ? candidateDone.size() >= candidate.size() : targets.isEmpty())) {
                 // Drill mode: the completions are the product; don't replay
                 // the rest of the mainline. Draw end keeps the results row
                 // obviously non-decisive.
                 game.setGameOver(GameEndReason.Draw);
             }
+        }
+
+        private CandidatePoint candidatePointFor(
+                int turn, PhaseType phase, Player priority, long window) {
+            if (candidate == null) {
+                return null;
+            }
+            int seat = -1;
+            for (int i = 0; i < game.getRegisteredPlayers().size(); i++) {
+                if (game.getRegisteredPlayers().get(i).getName().equals(priority.getName())) {
+                    seat = i;
+                    break;
+                }
+            }
+            for (CandidatePoint p : candidate.values()) {
+                if (candidateDone.contains(p.window) || p.turn != turn
+                        || (window >= 0 && p.window != window)) {
+                    continue;
+                }
+                if (p.seat != seat) {
+                    continue;
+                }
+                if (p.phase != null && !p.phase.isEmpty() && !p.phase.equals(String.valueOf(phase))) {
+                    continue;
+                }
+                return p;
+            }
+            return null;
         }
 
         private void doRollouts(int turn, int targetTurn) {
@@ -1053,6 +1226,12 @@ public final class AnvilRun {
             }
             if (choice != null) {
                 doChoiceRollouts(turn, targetTurn);
+                return;
+            }
+            if (candidate != null) {
+                // candidate mode is dispatched directly from onPriority with
+                // its stable window descriptor; this guard prevents an old
+                // turn-only path from accidentally consuming it.
                 return;
             }
             if (forceSeq > 0) {
@@ -1422,6 +1601,232 @@ public final class AnvilRun {
                 labels.println(sb);
                 labels.flush();
             }
+        }
+
+        /** Generic candidate campaign: one shared NATURAL completion and one
+         * exact forced completion per candidate arm for every paired rollout
+         * seed.  The seed is keyed by (game, stable window id, rollout), never
+         * by the transient fp counter, so a subset rerun preserves pairing. */
+        private void doCandidateRollouts(int turn, CandidatePoint point) {
+            int myFp = fp++;
+            PhaseHandler ph = game.getPhaseHandler();
+            Player prio = ph.getPriorityPlayer();
+            boolean bridgeSeat = prio.getController() instanceof PlayerControllerAnvil
+                    && ((PlayerControllerAnvil) prio.getController()).bridgesPriority();
+            if (!bridgeSeat || point.seat < 0 || point.seat >= game.getRegisteredPlayers().size()) {
+                writeCandidateSkips(point, "SEAT_MISMATCH", myFp, turn);
+                return;
+            }
+            String seatName = game.getRegisteredPlayers().get(point.seat).getName();
+            // Candidate targets are joined by the source decision sequence.
+            // Do not persist a mainline Obs.mark here: mark() consumes a
+            // sequence number before chooseSpellAbilityToPlay emits the
+            // current decision and would shift every later candidate window
+            // in this replay.  The labels row carries the fork metadata.
+            byte[] rngState = snapshotRng();
+            int[] natural = new int[k];
+            Arrays.fill(natural, -2);
+            int[][] forced = new int[point.arms.size()][k];
+            for (int[] row : forced) {
+                Arrays.fill(row, -3); // intervention skipped until realized
+            }
+            int[][] natWins = new int[point.arms.size()][1];
+            int[][] forcedWins = new int[point.arms.size()][1];
+            int[] paired = new int[point.arms.size()];
+            int[] realized = new int[point.arms.size()];
+            Map<String, Integer>[] skips = new Map[point.arms.size()];
+            for (int i = 0; i < skips.length; i++) {
+                skips[i] = new TreeMap<>();
+            }
+            long block0 = System.nanoTime();
+            long copyMsTotal = 0;
+            for (int r = 0; r < k; r++) {
+                long rollSeed = splitmix64(
+                        seed ^ (point.window * 0x9E3779B97F4A7C15L)
+                                ^ (r * 0xBF58476D1CE4E5B9L));
+                Game naturalCopy;
+                long c0 = System.nanoTime();
+                try {
+                    naturalCopy = new GameCopier(game).makeCopy();
+                } catch (Throwable t) {
+                    MyRandom.setRandom(restoreRng(rngState));
+                    continue;
+                }
+                copyMsTotal += (System.nanoTime() - c0) / 1_000_000;
+                natural[r] = completeCandidateCopy(naturalCopy,
+                        "g" + gameIdx + ".w" + point.window + ".r" + r + ".n",
+                        rollSeed, seatName, null, rngState);
+
+                for (int a = 0; a < point.arms.size(); a++) {
+                    CandidateArm arm = point.arms.get(a);
+                    Game forcedCopy;
+                    c0 = System.nanoTime();
+                    try {
+                        forcedCopy = new GameCopier(game).makeCopy();
+                    } catch (Throwable t) {
+                        skips[a].merge("COPY_FAILURE", 1, Integer::sum);
+                        MyRandom.setRandom(restoreRng(rngState));
+                        continue;
+                    }
+                    copyMsTotal += (System.nanoTime() - c0) / 1_000_000;
+                    forced[a][r] = completeCandidateCopy(forcedCopy,
+                            "g" + gameIdx + ".w" + point.window + ".r" + r + ".c" + arm.ordinal,
+                            rollSeed, seatName, arm, rngState);
+                    PlayerControllerAnvil.ForcedCandidate fc =
+                            PlayerControllerAnvil.forcedCandidate(forcedCopy);
+                    PlayerControllerAnvil.CandidateResult result = fc == null
+                            ? PlayerControllerAnvil.CandidateResult.PENDING : fc.result;
+                    PlayerControllerAnvil.clearForcedCandidate(forcedCopy);
+                    if (result == PlayerControllerAnvil.CandidateResult.PENDING) {
+                        // The copied game ended or drifted before consuming
+                        // the directive; expose it as the public missing-arm
+                        // status rather than leaking an internal pending
+                        // state into the label vocabulary.
+                        result = PlayerControllerAnvil.CandidateResult.NO_MATCH;
+                    }
+                    if (result == PlayerControllerAnvil.CandidateResult.CAST) {
+                        realized[a]++;
+                    } else {
+                        skips[a].merge(result.name(), 1, Integer::sum);
+                        forced[a][r] = -3;
+                    }
+                    if (natural[r] >= -1 && forced[a][r] >= -1) {
+                        paired[a]++;
+                        if (natural[r] >= 0) {
+                            natWins[a][0] += natural[r] == point.seat ? 1 : 0;
+                        }
+                        if (forced[a][r] >= 0) {
+                            forcedWins[a][0] += forced[a][r] == point.seat ? 1 : 0;
+                        }
+                    }
+                }
+            }
+            bridge.gameStart("g" + gameIdx, seed, Obs.lastHeaderForBridge(game));
+            if (labels == null) {
+                return;
+            }
+            for (int a = 0; a < point.arms.size(); a++) {
+                CandidateArm arm = point.arms.get(a);
+                StringBuilder sb = new StringBuilder(384);
+                sb.append("{\"ev\":\"candidate\",\"source\":\"")
+                        .append(jstr(point.source)).append('"')
+                        .append(",\"i\":").append(gameIdx)
+                        .append(",\"window\":").append(point.window)
+                        .append(",\"fp\":").append(myFp)
+                        .append(",\"t\":").append(turn)
+                        .append(",\"phase\":\"").append(jstr(point.phase)).append('"')
+                        .append(",\"seat\":").append(point.seat)
+                        .append(",\"candidate\":{\"entity\":").append(arm.entity)
+                        .append(",\"sa\":\"").append(jstr(arm.sa)).append("\"}")
+                        .append(",\"paired\":").append(paired[a])
+                        .append(",\"natural_wins\":").append(natWins[a][0])
+                        .append(",\"forced_wins\":").append(forcedWins[a][0])
+                        .append(",\"paired_win_delta\":")
+                        .append(forcedWins[a][0] - natWins[a][0])
+                        .append(",\"forced_realized\":").append(realized[a])
+                        .append(",\"forced_total\":").append(k)
+                        .append(",\"skip_counts\":{");
+                boolean first = true;
+                for (Map.Entry<String, Integer> e : skips[a].entrySet()) {
+                    sb.append(first ? "" : ",").append('"').append(jstr(e.getKey()))
+                            .append("\":").append(e.getValue());
+                    first = false;
+                }
+                sb.append("},\"copy_ms\":").append(copyMsTotal)
+                        .append(",\"ms\":").append((System.nanoTime() - block0) / 1_000_000)
+                        .append('}');
+                synchronized (labels) {
+                    labels.println(sb);
+                    labels.flush();
+                }
+            }
+        }
+
+        private void writeCandidateSkips(CandidatePoint point, String reason, int myFp, int turn) {
+            if (labels == null) {
+                return;
+            }
+            for (CandidateArm arm : point.arms) {
+                synchronized (labels) {
+                    labels.println("{\"ev\":\"candidate\",\"source\":\""
+                            + jstr(point.source) + "\",\"i\":" + gameIdx
+                            + ",\"window\":" + point.window + ",\"fp\":" + myFp
+                            + ",\"t\":" + turn + ",\"seat\":" + point.seat
+                            + ",\"candidate\":{\"entity\":" + arm.entity
+                            + ",\"sa\":\"" + jstr(arm.sa) + "\"}"
+                            + ",\"status\":\"" + reason + "\",\"paired\":0}");
+                    labels.flush();
+                }
+            }
+        }
+
+        /** Emit an explicit miss for a target that the replay never reached
+         *  (for example, sampled source and replay streams diverged before
+         *  the recorded window).  A missing row must not look like a clean
+         *  zero-sample arm to the Python label join. */
+        void finishCandidateSkips() {
+            if (candidate == null) {
+                return;
+            }
+            int nowTurn = game.getPhaseHandler().getTurn();
+            for (CandidatePoint point : candidate.values()) {
+                if (!candidateDone.contains(point.window)) {
+                    candidateDone.add(point.window);
+                    writeCandidateSkips(point, "NO_MATCH", fp++, nowTurn);
+                }
+            }
+        }
+
+        /** Return registered-player winner index, -1 for draw/no outcome,
+         * -2 for a completion crash. */
+        private int completeCandidateCopy(Game copy, String wid, long rollSeed,
+                String seatName, CandidateArm arm, byte[] rngState) {
+            copy.getPhaseHandler().devResumeAtPriority();
+            copy.copyLastState();
+            Obs.startWireGame(copy, wid, rollSeed, fmt, game);
+            bridge.gameStart(wid, rollSeed, Obs.lastHeaderForBridge(copy));
+            if (arm != null) {
+                PlayerControllerAnvil.armForcedCandidate(copy, seatName, arm.entity, arm.sa);
+            }
+            Random rollRng = new Random(rollSeed);
+            if (reshuffle) {
+                for (Player p : copy.getPlayers()) {
+                    List<Card> lib = new ArrayList<>();
+                    for (Card c : p.getZone(ZoneType.Library)) {
+                        lib.add(c);
+                    }
+                    Collections.shuffle(lib, rollRng);
+                    p.getZone(ZoneType.Library).setCards(lib);
+                }
+            }
+            MyRandom.setRandom(rollRng);
+            boolean crashed = false;
+            ScheduledFuture<?> clock = watchdogs.schedule(
+                    () -> copy.setGameOver(GameEndReason.Draw),
+                    ROLLOUT_TIMEOUT_S, TimeUnit.SECONDS);
+            int winner = -1;
+            try {
+                copy.getPhaseHandler().mainGameLoop();
+                if (copy.getOutcome() != null && !copy.getOutcome().isDraw()) {
+                    String w = copy.getOutcome().getWinningLobbyPlayer().getName();
+                    for (int j = 0; j < copy.getRegisteredPlayers().size(); j++) {
+                        if (copy.getRegisteredPlayers().get(j).getName().equals(w)) {
+                            winner = j;
+                            break;
+                        }
+                    }
+                }
+            } catch (Throwable t) {
+                crashed = true;
+            } finally {
+                clock.cancel(false);
+                if (!copy.isGameOver()) {
+                    copy.setGameOver(GameEndReason.Draw);
+                }
+                MyRandom.setRandom(restoreRng(rngState));
+                Obs.endWireGame(copy);
+            }
+            return crashed ? -2 : winner;
         }
 
         /** M10 sched rollouts (m10-ceiling-spec instrument): NATURAL + each
