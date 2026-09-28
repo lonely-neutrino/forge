@@ -207,6 +207,106 @@ public class PlayerControllerAnvil extends CensusPlayerController {
         forced.put(g, new Forced(f, playerName));
     }
 
+    // Generic counterfactual priority-candidate directive.  The descriptor
+    // is intentionally host-id + normalized SA: it is the same identity
+    // emitted by Obs.decPriority and consumed by the Python featurizer.
+    public enum CandidateResult {
+        PENDING, CAST, NO_MATCH, VETO, NO_ONESHOT, PASS_RESPONSE,
+        SEAT_MISMATCH, TRANSPORT_FAILURE
+    }
+
+    public static final class ForcedCandidate {
+        public final int entity;
+        public final String sa;
+        final String playerName;
+        public volatile CandidateResult result = CandidateResult.PENDING;
+
+        ForcedCandidate(int entity, String sa, String playerName) {
+            this.entity = entity;
+            this.sa = sa;
+            this.playerName = playerName;
+        }
+    }
+
+    private static final java.util.Map<Game, ForcedCandidate> forcedCandidates =
+            java.util.Collections.synchronizedMap(new java.util.WeakHashMap<>());
+
+    public static void armForcedCandidate(Game g, String playerName, int entity, String sa) {
+        forcedCandidates.put(g, new ForcedCandidate(entity, normalizeSa(sa), playerName));
+    }
+
+    public static ForcedCandidate forcedCandidate(Game g) {
+        return forcedCandidates.get(g);
+    }
+
+    public static void clearForcedCandidate(Game g) {
+        forcedCandidates.remove(g);
+    }
+
+    private static String normalizeSa(String sa) {
+        // Keep this byte-for-byte aligned with Python's norm_sa(): the
+        // descriptor vocabulary treats every rendered X-value suffix as the
+        // same spell ability.
+        return sa == null ? "" : sa.replaceAll(" \\(X=\\d+\\)", "");
+    }
+
+    /** Resolve exactly one requested candidate.  A null/invalid plan is a
+     *  labeled intervention outcome; it never falls through to another
+     *  bridge choice. */
+    private List<SpellAbility> chooseForcedCandidate(List<SpellAbility> options,
+            ForcedCandidate fc) {
+        int option = -1;
+        for (int i = 0; i < options.size(); i++) {
+            SpellAbility sa = options.get(i);
+            if (sa.getHostCard() != null && sa.getHostCard().getId() == fc.entity
+                    && normalizeSa(Census.str(sa)).equals(fc.sa)) {
+                option = i;
+                break;
+            }
+        }
+        if (option < 0) {
+            fc.result = CandidateResult.NO_MATCH;
+            return null;
+        }
+        if (!bridge.supportsForcedCandidate()) {
+            fc.result = CandidateResult.NO_ONESHOT;
+            return null;
+        }
+        List<String> labels = Lists.newArrayListWithCapacity(options.size() + 1);
+        labels.add("pass");
+        for (SpellAbility sa : options) {
+            labels.add(Census.str(sa));
+        }
+        long obsSeq = Obs.decPriority(getGame(), getPlayer(), "forced_candidate", options);
+        CastPlanAnswer plan;
+        try {
+            plan = bridge.priorityCastPlan(TAG_PRIORITY, labels,
+                    Obs.lastDecForBridge(getGame()), 0, false, option + 1);
+        } catch (RuntimeException ex) {
+            fc.result = CandidateResult.TRANSPORT_FAILURE;
+            Obs.ret(getGame(), obsSeq, null);
+            return null;
+        }
+        if (plan == null) {
+            fc.result = CandidateResult.NO_ONESHOT;
+            Obs.ret(getGame(), obsSeq, null);
+            return null;
+        }
+        if (plan.optionIndex != option + 1) {
+            fc.result = CandidateResult.VETO;
+            Obs.ret(getGame(), obsSeq, null);
+            return null;
+        }
+        OneShot realized = oneShotCast(options, plan, obsSeq, 0);
+        if (realized.sas != null) {
+            fc.result = CandidateResult.CAST;
+            return realized.sas;
+        }
+        fc.result = realized.vetoedOption > 0
+                ? CandidateResult.VETO : CandidateResult.PASS_RESPONSE;
+        return null;
+    }
+
     // ------------------------------------------------------------------
     // M7 D2 sequence probe (m7-plan routing pin, 2026-08-11): PERSISTENT
     // directive over an N-turn horizon — the sequence-granularity sibling
@@ -517,6 +617,17 @@ public class PlayerControllerAnvil extends CensusPlayerController {
         // Mutable copy: re-ask removes vetoed candidates between attempts.
         List<SpellAbility> options =
                 Lists.newArrayList(AnvilOptions.priorityOptions(getGame(), player));
+
+        ForcedCandidate fc = forcedCandidates.get(getGame());
+        if (fc != null && fc.result == CandidateResult.PENDING) {
+            if (fc.playerName.equals(player.getName())) {
+                return chooseForcedCandidate(options, fc);
+            }
+            // This is a legitimate opponent-priority window in the generic
+            // all-phase drill.  Leave the directive armed for the requested
+            // seat; the monitor's resume fidelity check decides whether the
+            // target seat is eventually reached.
+        }
 
         Forced fd = consumeForced();
         if (fd != null && fd.first == ForcedFirst.HOLD) {

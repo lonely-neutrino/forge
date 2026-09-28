@@ -122,6 +122,11 @@ public class GameCopier {
         PhaseHandler origPhaseHandler = origGame.getPhaseHandler();
         Player newPlayerTurn = playerMap.get(origPhaseHandler.getPlayerTurn());
         newGame.getPhaseHandler().devModeSet(origPhaseHandler.getPhase(), newPlayerTurn, origPhaseHandler.getTurn());
+        // The generic candidate drill may fork at opponent priority (combat
+        // and end-step windows).  devModeSet resets priority to the active
+        // player, so preserve the source seat before resuming the loop.
+        newGame.getPhaseHandler().devResumeAtPriority(
+                playerMap.get(origPhaseHandler.getPriorityPlayer()));
         newGame.getTriggerHandler().suppressMode(TriggerType.ChangesZone);
         for (Player p : newGame.getPlayers()) {
             ((PlayerZoneBattlefield) p.getZone(ZoneType.Battlefield)).setTriggers(false);

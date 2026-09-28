@@ -68,6 +68,7 @@ public final class GrpcBridge implements AnvilBridge {
     private final LinkedBlockingQueue<ServerMsg> in = new LinkedBlockingQueue<>();
     private final Set<String> serverTags;
     private final boolean oneShotCast;
+    private final boolean forcedPriorityOption;
     private long seq;
     private long lastPrioritySeq;
     private String gameId = "";
@@ -107,11 +108,23 @@ public final class GrpcBridge implements AnvilBridge {
         }
         serverTags = Set.copyOf(hello.getHello().getBridgedTagsList());
         oneShotCast = hello.getHello().getOneShotCast();
+        forcedPriorityOption = hello.getHello().getForcedPriorityOption();
     }
 
     /** Server-driven coverage: the tag set this session answers over the wire. */
     public Set<String> serverBridgedTags() {
         return serverTags;
+    }
+
+    /** Additive candidate-drill capability; false means the worker must
+     * report an explicit unsupported arm rather than silently natural-cast. */
+    public boolean forcedPriorityOption() {
+        return forcedPriorityOption;
+    }
+
+    @Override
+    public boolean supportsForcedCandidate() {
+        return oneShotCast && forcedPriorityOption;
     }
 
     public int transportFailures() {
@@ -325,7 +338,18 @@ public final class GrpcBridge implements AnvilBridge {
     @Override
     public CastPlanAnswer priorityCastPlan(String tag, List<String> optionLabels,
             String observation, int attempt, boolean forbidDecline) {
+        return priorityCastPlan(tag, optionLabels, observation, attempt, forbidDecline, 0);
+    }
+
+    @Override
+    public CastPlanAnswer priorityCastPlan(String tag, List<String> optionLabels,
+            String observation, int attempt, boolean forbidDecline, int forcedOption) {
         if (!oneShotCast) {
+            return null;
+        }
+        if (forcedOption > 0 && !forcedPriorityOption) {
+            // The caller's candidate labels distinguish this null from a
+            // natural pass as UNSUPPORTED; no fallback arm is attempted.
             return null;
         }
         if (poisonReason != null) {
@@ -338,6 +362,9 @@ public final class GrpcBridge implements AnvilBridge {
         if (forbidDecline) {
             // M7 forced-branch act ask: server masks the pass logit.
             req.setForbidDecline(true);
+        }
+        if (forcedOption > 0) {
+            req.setForceOption(true).setForcedOption(forcedOption);
         }
         lastPrioritySeq = seq;
         if (attempt > 0 && prevPrioritySeq > 0) {

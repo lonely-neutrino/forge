@@ -54,6 +54,7 @@ message ServerHello {
   repeated string bridged_tags = 2;
   bool one_shot_cast = 3;        // M1; CastPlan composite answers to mtg.priority
   uint32 default_deadline_ms = 4;
+  bool forced_priority_option = 5; // candidate-drill exact wire-option forcing
 }
 
 message GameStart {
@@ -102,6 +103,8 @@ message DecisionRequest {
   // this decision (mtg.priority: the server masks the pass logit before
   // sampling). Game-agnostic framing — "must choose a non-null option".
   bool forbid_decline = 11;
+  bool force_option = 12;
+  uint32 forced_option = 13;
   // M0 measurement instrument only, never a protocol feature: when set, the
   // worker pre-drew the answer from its seeded RNG and the server must echo
   // it verbatim. Makes gRPC-arm games bit-identical to local-arm games so the
