@@ -83,6 +83,8 @@ public final class Obs {
     public static volatile String searchPins = null;
     /** Evening 4 (ADR-0105): the rescue flag (-payrescue) on every header. */
     public static volatile boolean payRescue = false;
+    /** Additive schema-v3 legal target plans on priority options. */
+    public static volatile boolean targetPlanMask = false;
     private static final int ZSTD_LEVEL = 3;
     /** Per-game raw-byte ceiling; 2x the 50K-pilot's largest legit frame. */
     private static final long RAW_CAP = Long.getLong("anvil.obs.rawcap", 1L << 30);
@@ -453,6 +455,9 @@ public final class Obs {
         if (payRescue) {
             sb.append(",\"payrescue\":true");
         }
+        if (targetPlanMask) {
+            sb.append(",\"target_plan_mask_version\":1");
+        }
         if (searchPins != null) {
             sb.append(",\"search\":").append(searchPins);
         }
@@ -712,6 +717,9 @@ public final class Obs {
                         .append(",\"sa\":").append(q(trunc(String.valueOf(sa))))
                         .append(",\"kind\":\"").append(kind(sa)).append('"');
                 ak(ob, sa);
+                if (targetPlanMask) {
+                    CastTargetPlanEnumerator.enumerate(g, sa).appendJson(ob);
+                }
                 ob.append('}');
                 opts.add(ob.toString());
                 // Hosts castable from an unwalked zone (library top): the

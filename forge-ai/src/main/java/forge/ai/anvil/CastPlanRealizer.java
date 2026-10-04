@@ -12,6 +12,7 @@ import forge.game.player.Player;
 import forge.game.spellability.SpellAbility;
 import forge.game.spellability.SpellAbilityStackInstance;
 import forge.game.spellability.TargetRestrictions;
+import forge.game.staticability.StaticAbilityMustTarget;
 
 /**
  * Realizes a rung-1 CastPlanAnswer against the chosen host's candidate SAs
@@ -199,7 +200,7 @@ public final class CastPlanRealizer {
      * True iff every node reaches a valid target count and every ref is
      * consumed. Mutates the SA — callers pair with clear().
      */
-    private static boolean tryApply(SpellAbility sa, List<GameObject> refs, CastPlanAnswer ans) {
+    static boolean tryApply(SpellAbility sa, List<GameObject> refs, CastPlanAnswer ans) {
         boolean saHasX = !sa.isLandAbility() && sa.getPayCosts() != null
                 && sa.getPayCosts().getTotalMana() != null
                 && sa.getPayCosts().getTotalMana().countX() > 0;
@@ -252,7 +253,23 @@ public final class CastPlanRealizer {
         }
         // Targetless spells have no shape slot for the shared decoder's
         // irrelevant refs. Target-bearing spells must consume every ref.
-        return !hasTargeting || ri == refs.size();
+        return (!hasTargeting || ri == refs.size())
+                && (!Obs.targetPlanMask || targetsMeetGlobalRestrictions(sa));
+    }
+
+    /** Whole-plan checks that only become meaningful after every target node
+     * has been populated. Shared with the pre-inference enumerator. */
+    static boolean targetsMeetGlobalRestrictions(SpellAbility sa) {
+        if (!StaticAbilityMustTarget.meetsMustTargetRestriction(sa)) {
+            return false;
+        }
+        for (SpellAbility node = sa; node != null; node = node.getSubAbility()) {
+            if (node.isDividedAsYouChoose() && !node.getTargets().isEmpty()
+                    && node.getStillToDivide() < node.getTargets().size()) {
+                return false;
+            }
+        }
+        return true;
     }
 
     private static boolean hasTargeting(SpellAbility sa) {
@@ -264,7 +281,7 @@ public final class CastPlanRealizer {
         return false;
     }
 
-    private static void clear(SpellAbility sa) {
+    static void clear(SpellAbility sa) {
         for (SpellAbility node = sa; node != null; node = node.getSubAbility()) {
             if (node.usesTargeting()) {
                 node.clearTargets();

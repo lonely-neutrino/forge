@@ -1851,6 +1851,12 @@ public abstract class SpellAbility extends CardTraitBase implements ISpellAbilit
         return this.dividedValue;
     }
 
+    /** Restore hook for side-effect-free legality probes that temporarily
+     * call clearTargets(), which recomputes this runtime value. */
+    public void setDividedValue(final Integer value) {
+        this.dividedValue = value;
+    }
+
     public int getStillToDivide() {
         if (!isDividedAsYouChoose() || dividedValue == null) {
             return 0;

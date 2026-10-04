@@ -149,7 +149,7 @@ public final class AnvilRun {
                     + "[-search [-searchrate <p>] [-searchrolls <k>] [-searchopts <cap>] [-searchmana] "
                     + "[-searchsurf <B> [-searchsurfcap <C>]] [-searchact <bar> [-searchtemp <T>]] "
                     + "[-searchseats <csv>] [-searchactkinds <csv|all>] [-searchleaf next|eot|h<N>|end] [-searchrollsalt <long>] [-searchpay <B> [-searchpayleaf eot|next|h<N>|end] [-searchpaybridge]] [-searchdeep <B> [-searchdeepleaf eot|h<N>|end] [-searchdeeprolls <k>] [-searchdeeplo <m>] [-searchdeepfloor <p>] [-searchdeepbar <bar>]] [-searchclock <s>] [-searchvoidrescue] [-searchalloc <tau> [-searchfloor <p>]]] "
-                    + "[-payrescue] [-replay <jobs.jsonl>]");
+                    + "[-payrescue] [-targetmask legal-plans] [-replay <jobs.jsonl>]");
             return;
         }
 
@@ -398,6 +398,13 @@ public final class AnvilRun {
         if (params.containsKey("payrescue")) {
             forge.ai.anvil.AnvilOptions.PAYRESCUE = true;
             Obs.payRescue = true;
+        }
+        if (params.containsKey("targetmask")) {
+            List<String> values = params.get("targetmask");
+            if (values.isEmpty() || !"legal-plans".equals(values.get(0))) {
+                throw new IllegalArgumentException("-targetmask legal-plans");
+            }
+            Obs.targetPlanMask = true;
         }
         // M12 Build 2 (m12-plan canonical shape §2): the ACTING rule. -searchact
         // <bar> turns the instrument into the behavior policy: at a searched
